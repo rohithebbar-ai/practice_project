@@ -1,3 +1,13 @@
+"""
+document_analyzer.py  (v3.2)
+──────────────────────────────
+Changes from v3.1:
+  - classify_rule_based() improved:
+    * Excel files always content-checked first (BOQ signal detection)
+    * Stronger PDF content fallbacks
+    * Better coverage for project-named files
+"""
+
 import os
 from typing import List, Dict, Any, Tuple
 
@@ -29,12 +39,10 @@ from src.procurement_tracker_extractor import (
 from src.text_selector import select_relevant_text
 
 # ── Token limits ──────────────────────────────────────────────────────────────
-# Max tokens we allow in a single LLM call (input + output combined).
-# Your model context window minus output budget.
-MAX_INPUT_TOKENS   = 28_000   # leaves ~4k for output
-MAX_OUTPUT_TOKENS  = 3_500
+MAX_INPUT_TOKENS  = 28_000
+MAX_OUTPUT_TOKENS = 3_500
 
-# ── Per-document char budgets (used by text_selector) ────────────────────────
+# ── Per-document char budgets ─────────────────────────────────────────────────
 DOC_TYPE_CHAR_BUDGET = {
     DocumentType.RFQ_INDENT:               6_000,
     DocumentType.BOQ:                      8_000,
@@ -48,21 +56,15 @@ DOC_TYPE_CHAR_BUDGET = {
 }
 DEFAULT_CHAR_BUDGET = 8_000
 
-# Drawings add no value when parsed to text
 SKIP_EXTRACTION_TYPES = {DocumentType.DRAWING}
 
 
 def _count_tokens(text: str) -> int:
-    """
-    Estimate token count.
-    Uses tiktoken if available (accurate), falls back to char/4 heuristic.
-    """
     try:
         import tiktoken
         enc = tiktoken.get_encoding("cl100k_base")
         return len(enc.encode(text))
     except ImportError:
-        # Fallback: ~4 chars per token for English/mixed content
         return len(text) // 4
 
 
@@ -70,28 +72,14 @@ def _compress_docs_block(
     prepared: List[Dict],
     target_tokens: int,
 ) -> Tuple[str, int]:
-    """
-    Progressively compress the docs block to fit within target_tokens.
-
-    Strategy (in order):
-    1. Reduce each doc's text to 60% of current length using text_selector
-       with tighter budget.
-    2. If still over, drop lowest-value docs (drawings first, then OTHER).
-    3. If still over, truncate each doc equally.
-
-    Returns (compressed_block, actual_token_count).
-    """
     # Step 1: tighter keyword selection (60% of current budget)
     tighter_prepared = []
     for doc in prepared:
-        current_len = len(doc["prepared_text"])
-        tighter_budget = int(current_len * 0.6)
-        if tighter_budget < 500:
-            tighter_budget = 500
+        current_len    = len(doc["prepared_text"])
+        tighter_budget = max(int(current_len * 0.6), 500)
+        doc_type       = doc["classification"].document_type
 
-        doc_type = doc["classification"].document_type
         if doc.get("extraction_method") == "tracker_field_extractor":
-            # Tracker already extracted — can't compress further meaningfully
             tighter_prepared.append(doc)
         else:
             new_text, _ = select_relevant_text(
@@ -99,7 +87,7 @@ def _compress_docs_block(
             )
             tighter_prepared.append({**doc, "prepared_text": new_text})
 
-    block = _build_docs_block(tighter_prepared)
+    block  = _build_docs_block(tighter_prepared)
     tokens = _count_tokens(block)
     if tokens <= target_tokens:
         return block, tokens
@@ -124,18 +112,18 @@ def _compress_docs_block(
                       if d["classification"].document_type == drop_type]
         if candidates and len(surviving) > 1:
             surviving.remove(candidates[-1])
-            block = _build_docs_block(surviving)
+            block  = _build_docs_block(surviving)
             tokens = _count_tokens(block)
 
     if tokens <= target_tokens:
         return block, tokens
 
-    # Step 3: equal truncation across remaining docs
+    # Step 3: equal truncation
     chars_per_doc = (target_tokens * 4) // max(len(surviving), 1)
     for doc in surviving:
         doc["prepared_text"] = doc["prepared_text"][:chars_per_doc]
 
-    block = _build_docs_block(surviving)
+    block  = _build_docs_block(surviving)
     tokens = _count_tokens(block)
     return block, tokens
 
@@ -160,7 +148,197 @@ class DocumentAnalyzer:
         self.llm = LLMClient()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # PUBLIC: Per-indent extraction
+    # Classification
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def classify_rule_based(
+        self,
+        document_name: str,
+        document_text: str,
+    ) -> DocumentClassification:
+        """
+        Rule-based classification — zero LLM calls.
+
+        Priority order:
+        1. Procurement Tracker content detection (always first)
+        2. Excel files → content-based BOQ detection (always before filename)
+        3. Filename keyword matching
+        4. Content keyword matching (first 2000 chars)
+        5. Fallback to OTHER
+        """
+        name = document_name.lower()
+        text = document_text[:3000].lower()   # slightly more for content checks
+        ext  = name.split(".")[-1] if "." in name else ""
+
+        # ── 1. Procurement Tracker (content-based, filename-independent) ──────
+        if is_procurement_tracker_doc(document_name, document_text):
+            return DocumentClassification(
+                document_name=document_name,
+                document_type=DocumentType.RFQ_INDENT,
+                short_reason="Procurement Tracker portal export detected",
+                confidence=ConfidenceLevel.HIGH,
+            )
+
+        # ── 2. Excel files — content check FIRST ─────────────────────────────
+        # Excel files in procurement are almost always BOQ or cost estimates
+        # regardless of what they're named (project-specific names are common)
+        if ext in ("xlsx", "xls", "xlsm", "xlsb"):
+            boq_signals = [
+                "quantity", "qty", "rate", "amount", "uom",
+                "unit of measure", "item description", "item no",
+                "boq", "bill of quantit", "cost estimate",
+                "service type", "slno", "s.no", "sno",
+                "description", "total", "supply", "erection",
+                "fabrication", "labour", "material",
+            ]
+            hits = sum(1 for s in boq_signals if s in text)
+            if hits >= 2:
+                return DocumentClassification(
+                    document_name=document_name,
+                    document_type=DocumentType.BOQ,
+                    short_reason=f"Excel file with {hits} BOQ/cost content signals",
+                    confidence=ConfidenceLevel.MEDIUM,
+                )
+
+        # ── 3. Filename keyword matching ──────────────────────────────────────
+        filename_rules = [
+            (["boq", "bill of quantity", "bill of quantities"],
+             DocumentType.BOQ, "Filename: BOQ"),
+
+            (["rfq", "indent_rfq"],
+             DocumentType.RFQ_INDENT, "Filename: RFQ"),
+
+            (["safety", "hse", "health and safety"],
+             DocumentType.SAFETY_DOCUMENT, "Filename: Safety/HSE"),
+
+            (["term sheet", "termsheet", "term-sheet"],
+             DocumentType.TERMSHEET, "Filename: Term Sheet"),
+
+            (["drawing", "drg", "dwg"],
+             DocumentType.DRAWING, "Filename: Drawing"),
+
+            (["technical spec", "tech spec", "specification"],
+             DocumentType.TECHNICAL_SPECIFICATION, "Filename: Tech Spec"),
+
+            (["approval", "single party", "single_party"],
+             DocumentType.APPROVAL_NOTE, "Filename: Approval"),
+
+            (["cost estimate", "cost_estimate", "costing"],
+             DocumentType.BOQ, "Filename: Cost Estimate"),
+
+            (["vendor", "supplier"],
+             DocumentType.VENDOR_DOCUMENT, "Filename: Vendor"),
+        ]
+
+        for keywords, doc_type, reason in filename_rules:
+            if any(kw in name for kw in keywords):
+                return DocumentClassification(
+                    document_name=document_name,
+                    document_type=doc_type,
+                    short_reason=reason,
+                    confidence=ConfidenceLevel.HIGH,
+                )
+
+        # TS / TSP prefix (common naming for technical specs at Tata Steel)
+        fname_no_ext = name.rsplit(".", 1)[0] if "." in name else name
+        if (fname_no_ext.startswith("ts") or
+                fname_no_ext.startswith("tsp") or
+                fname_no_ext.startswith("tsl-tsp")):
+            return DocumentClassification(
+                document_name=document_name,
+                document_type=DocumentType.TECHNICAL_SPECIFICATION,
+                short_reason="Filename starts with TS/TSP/TSL-TSP",
+                confidence=ConfidenceLevel.HIGH,
+            )
+
+        # ── 4. Content keyword matching ───────────────────────────────────────
+        content_rules = [
+            # BOQ / cost estimate content
+            (["bill of quantity", "bill of quantities",
+              "item description", "unit rate", "unit of measure"],
+             DocumentType.BOQ, "Content: BOQ keywords"),
+
+            # RFQ / indent
+            (["request for quotation", "request of quotation",
+              "indent submission", "rfq no"],
+             DocumentType.RFQ_INDENT, "Content: RFQ keywords"),
+
+            # Technical specification
+            (["technical specification", "scope of services",
+              "scope of work", "shall be", "technical requirement",
+              "inspection criteria"],
+             DocumentType.TECHNICAL_SPECIFICATION, "Content: Tech Spec keywords"),
+
+            # Safety / HSE
+            (["health, safety", "hse requirement", "safety requirement",
+              "ppe", "personal protective equipment", "hazard identification",
+              "permit to work"],
+             DocumentType.SAFETY_DOCUMENT, "Content: Safety keywords"),
+
+            # Term sheet / commercial
+            (["payment term", "commercial term", "liquidated damage",
+              "penalty clause", "warranty period", "delivery obligation"],
+             DocumentType.TERMSHEET, "Content: Term Sheet keywords"),
+
+            # Approval note
+            (["single party approval", "single source", "proprietary",
+              "justification for", "approval authority"],
+             DocumentType.APPROVAL_NOTE, "Content: Approval keywords"),
+
+            # Vendor document
+            (["vendor qualification", "past experience",
+              "similar work", "turnover", "certification"],
+             DocumentType.VENDOR_DOCUMENT, "Content: Vendor keywords"),
+        ]
+
+        for keywords, doc_type, reason in content_rules:
+            hits = sum(1 for kw in keywords if kw in text)
+            # Require 2+ hits for content matching to avoid false positives
+            # (except for very specific phrases like "single party approval")
+            threshold = 1 if any(len(kw) > 20 for kw in keywords) else 2
+            if hits >= threshold:
+                return DocumentClassification(
+                    document_name=document_name,
+                    document_type=doc_type,
+                    short_reason=f"{reason} ({hits} hits)",
+                    confidence=ConfidenceLevel.MEDIUM,
+                )
+
+        # ── 5. Fallback ───────────────────────────────────────────────────────
+        return DocumentClassification(
+            document_name=document_name,
+            document_type=DocumentType.OTHER,
+            short_reason="Rule-based classifier uncertain",
+            confidence=ConfidenceLevel.LOW,
+        )
+
+    def classify(
+        self,
+        document_name: str,
+        document_text: str,
+    ) -> DocumentClassification:
+        """LLM-based classification — edge cases only."""
+        text = document_text[:12000]
+        messages = [
+            {"role": "system", "content": DOCUMENT_CLASSIFICATION_PROMPT_V1},
+            {"role": "user",
+             "content": f"Document Name:\n{document_name}\n\nDocument Content:\n{text}"},
+        ]
+        try:
+            result = self.llm.chat_json(messages=messages, max_tokens=500)
+        except Exception:
+            result = {"document_type": "Other",
+                      "short_reason": "LLM failed", "confidence": "Low"}
+        return DocumentClassification(
+            document_name=document_name,
+            document_type=self._safe_document_type(result.get("document_type")),
+            likely_indent_category=result.get("likely_indent_category"),
+            short_reason=result.get("short_reason", ""),
+            confidence=self._safe_confidence(result.get("confidence", "")),
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Per-indent extraction
     # ─────────────────────────────────────────────────────────────────────────
 
     def extract_indent(
@@ -169,21 +347,10 @@ class DocumentAnalyzer:
         indent_title: str,
         documents: List[Dict[str, Any]],
     ) -> IndentExtraction:
-        """
-        Process ALL documents from one indent in a SINGLE LLM call.
-
-        Parameters
-        ----------
-        indent_id    : str
-        indent_title : str
-        documents    : list of dicts with keys:
-                       document_name, document_text,
-                       classification, parser_metadata
-        """
         prepared     = []
         skipped_docs = []
 
-        # ── Step 1: prepare each document ────────────────────────────────────
+        # ── Prepare each document ─────────────────────────────────────────────
         for doc in documents:
             name     = doc["document_name"]
             raw_text = doc["document_text"]
@@ -230,16 +397,15 @@ class DocumentAnalyzer:
                 indent_id, indent_title, skipped_docs
             )
 
-        # ── Step 2: build docs block ──────────────────────────────────────────
-        docs_block     = _build_docs_block(prepared)
-        system_prompt  = INDENT_EXTRACTION_PROMPT_V3
-        user_prefix    = (
+        # ── Build docs block ──────────────────────────────────────────────────
+        docs_block    = _build_docs_block(prepared)
+        system_prompt = INDENT_EXTRACTION_PROMPT_V3
+        user_prefix   = (
             f"Indent ID: {indent_id}\n"
             f"Indent Title: {indent_title}\n"
             f"Total documents: {len(prepared)}\n\n"
         )
-        full_input     = system_prompt + user_prefix + docs_block
-        input_tokens   = _count_tokens(full_input)
+        input_tokens = _count_tokens(system_prompt + user_prefix + docs_block)
 
         print(
             f"\n  [TOKENS] {indent_id}: "
@@ -247,17 +413,19 @@ class DocumentAnalyzer:
             f"(limit {MAX_INPUT_TOKENS:,})"
         )
 
-        # ── Step 3: adaptive compression if over limit ────────────────────────
+        # ── Adaptive compression if over limit ────────────────────────────────
         if input_tokens > MAX_INPUT_TOKENS:
             print(
                 f"  [COMPRESS] Over limit — compressing "
                 f"({input_tokens:,} → target {MAX_INPUT_TOKENS:,})"
             )
-            target = MAX_INPUT_TOKENS - _count_tokens(system_prompt + user_prefix)
+            target     = MAX_INPUT_TOKENS - _count_tokens(
+                system_prompt + user_prefix
+            )
             docs_block, input_tokens = _compress_docs_block(prepared, target)
-            print(f"  [COMPRESS] After compression: ~{input_tokens:,} tokens")
+            print(f"  [COMPRESS] After: ~{input_tokens:,} tokens")
 
-        # ── Step 4: LLM call ──────────────────────────────────────────────────
+        # ── LLM call ──────────────────────────────────────────────────────────
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_prefix + docs_block},
@@ -272,7 +440,7 @@ class DocumentAnalyzer:
             print(f"  [ERROR] LLM call failed for {indent_id}: {e}")
             result = {}
 
-        # ── Step 5: parse result ──────────────────────────────────────────────
+        # ── Parse result ──────────────────────────────────────────────────────
         return self._parse_indent_result(
             indent_id=indent_id,
             indent_title=indent_title,
@@ -280,104 +448,6 @@ class DocumentAnalyzer:
             prepared=prepared,
             skipped_docs=skipped_docs,
             input_tokens=input_tokens,
-        )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Classification
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def classify_rule_based(
-        self,
-        document_name: str,
-        document_text: str,
-    ) -> DocumentClassification:
-        """Rule-based classification — zero LLM calls."""
-        name = document_name.lower()
-        text = document_text[:2000].lower()
-
-        if is_procurement_tracker_doc(document_name, document_text):
-            return DocumentClassification(
-                document_name=document_name,
-                document_type=DocumentType.RFQ_INDENT,
-                short_reason="Procurement Tracker portal export detected",
-                confidence=ConfidenceLevel.HIGH,
-            )
-
-        filename_rules = [
-            (["boq", "bill of quantity"],                     DocumentType.BOQ,                      "Filename: BOQ"),
-            (["rfq"],                                          DocumentType.RFQ_INDENT,               "Filename: RFQ"),
-            (["safety", "hse"],                               DocumentType.SAFETY_DOCUMENT,           "Filename: Safety/HSE"),
-            (["term sheet", "termsheet"],                      DocumentType.TERMSHEET,                 "Filename: Term Sheet"),
-            (["drawing"],                                      DocumentType.DRAWING,                   "Filename: Drawing"),
-            (["technical", "specification"],                   DocumentType.TECHNICAL_SPECIFICATION,   "Filename: Tech Spec"),
-            (["approval", "single party"],                     DocumentType.APPROVAL_NOTE,             "Filename: Approval"),
-            (["cost estimate", "cost_estimate"],               DocumentType.BOQ,                      "Filename: Cost Estimate"),
-            (["vendor"],                                       DocumentType.VENDOR_DOCUMENT,           "Filename: Vendor"),
-        ]
-        for keywords, doc_type, reason in filename_rules:
-            if any(kw in name for kw in keywords):
-                return DocumentClassification(
-                    document_name=document_name,
-                    document_type=doc_type,
-                    short_reason=reason,
-                    confidence=ConfidenceLevel.HIGH,
-                )
-
-        fname = document_name.lower().split(".")[0]
-        if fname.startswith("ts") or fname.startswith("tsp"):
-            return DocumentClassification(
-                document_name=document_name,
-                document_type=DocumentType.TECHNICAL_SPECIFICATION,
-                short_reason="Filename starts with TS/TSP",
-                confidence=ConfidenceLevel.HIGH,
-            )
-
-        content_rules = [
-            (["bill of quantity", "boq"],              DocumentType.BOQ,                      "Content: BOQ"),
-            (["request for quotation", "rfq"],         DocumentType.RFQ_INDENT,               "Content: RFQ"),
-            (["ppe", "hse", "safety requirement"],     DocumentType.SAFETY_DOCUMENT,           "Content: Safety"),
-            (["technical specification"],               DocumentType.TECHNICAL_SPECIFICATION,   "Content: Tech Spec"),
-            (["approval", "single party"],             DocumentType.APPROVAL_NOTE,             "Content: Approval"),
-            (["payment term", "commercial term"],      DocumentType.TERMSHEET,                 "Content: Term Sheet"),
-        ]
-        for keywords, doc_type, reason in content_rules:
-            if any(kw in text for kw in keywords):
-                return DocumentClassification(
-                    document_name=document_name,
-                    document_type=doc_type,
-                    short_reason=reason,
-                    confidence=ConfidenceLevel.MEDIUM,
-                )
-
-        return DocumentClassification(
-            document_name=document_name,
-            document_type=DocumentType.OTHER,
-            short_reason="Rule-based classifier uncertain",
-            confidence=ConfidenceLevel.LOW,
-        )
-
-    def classify(
-        self,
-        document_name: str,
-        document_text: str,
-    ) -> DocumentClassification:
-        """LLM-based classification — edge cases only."""
-        text = document_text[:12000]
-        messages = [
-            {"role": "system", "content": DOCUMENT_CLASSIFICATION_PROMPT_V1},
-            {"role": "user",   "content": f"Document Name:\n{document_name}\n\nDocument Content:\n{text}"},
-        ]
-        try:
-            result = self.llm.chat_json(messages=messages, max_tokens=500)
-        except Exception:
-            result = {"document_type": "Other",
-                      "short_reason": "LLM failed", "confidence": "Low"}
-        return DocumentClassification(
-            document_name=document_name,
-            document_type=self._safe_document_type(result.get("document_type")),
-            likely_indent_category=result.get("likely_indent_category"),
-            short_reason=result.get("short_reason", ""),
-            confidence=self._safe_confidence(result.get("confidence", "")),
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -394,7 +464,6 @@ class DocumentAnalyzer:
         input_tokens: int,
     ) -> IndentExtraction:
 
-        # procurement_summary
         ps_raw = result.get("procurement_summary", {}) or {}
         procurement_summary = ProcurementSummary(
             procurement_type        = ps_raw.get("procurement_type"),
@@ -408,7 +477,9 @@ class DocumentAnalyzer:
             job_risk_category       = ps_raw.get("job_risk_category"),
             is_single_party         = ps_raw.get("is_single_party"),
             vendor_panel            = ps_raw.get("vendor_panel"),
-            vendor_count            = ps_raw.get("vendor_count"),
+            vendor_count            = str(ps_raw.get("vendor_count"))
+                                      if ps_raw.get("vendor_count") is not None
+                                      else None,
             term_sheet_type         = ps_raw.get("term_sheet_type"),
             technical_spec_attached = ps_raw.get("technical_spec_attached"),
             hse_plan_available      = ps_raw.get("hse_plan_available"),
@@ -420,14 +491,13 @@ class DocumentAnalyzer:
             missing_documents       = ps_raw.get("missing_documents", []),
         )
 
-        # per-document analyses
         doc_results = result.get("documents", [])
-        documents = []
-        for i, doc in enumerate(prepared):
-            raw = doc_results[i] if i < len(doc_results) else {}
+        documents   = []
 
-            # Parse document_structure if present
+        for i, doc in enumerate(prepared):
+            raw    = doc_results[i] if i < len(doc_results) else {}
             ds_raw = raw.get("document_structure")
+
             document_structure = None
             if ds_raw and isinstance(ds_raw, dict):
                 try:
@@ -470,7 +540,6 @@ class DocumentAnalyzer:
                 extraction_method = skipped["reason"],
             ))
 
-        # aggregated fields
         good_practices = [
             GoodPractice.model_validate(p)
             for p in result.get("good_practices", [])
@@ -482,7 +551,6 @@ class DocumentAnalyzer:
             if isinstance(w, dict)
         ]
 
-        # risk_controls
         risk_controls = []
         for rc in result.get("risk_controls", []):
             if not isinstance(rc, dict):
@@ -505,7 +573,6 @@ class DocumentAnalyzer:
             except Exception:
                 continue
 
-        # approval_flow
         approval_flow = []
         for step in result.get("approval_flow", []):
             if not isinstance(step, dict):
@@ -525,7 +592,6 @@ class DocumentAnalyzer:
             if isinstance(r, str)
         ]
 
-        # category_document_patterns
         category_document_patterns = []
         for cdp in result.get("category_document_patterns", []):
             if not isinstance(cdp, dict):
@@ -541,7 +607,6 @@ class DocumentAnalyzer:
             except Exception:
                 continue
 
-        # extraction_confidence
         ec_raw = result.get("extraction_confidence", {}) or {}
         extraction_confidence = ExtractionConfidence(
             level  = self._safe_confidence(ec_raw.get("level", "Medium")),
@@ -561,11 +626,11 @@ class DocumentAnalyzer:
             category_document_patterns = category_document_patterns,
             extraction_confidence      = extraction_confidence,
             analyzer_metadata          = {
-                "prompt_version":    "v3.1",
-                "llm_model":         os.getenv("GENAI_MODEL", "gpt-4o-mini"),
-                "input_tokens":      input_tokens,
-                "docs_processed":    len(prepared),
-                "docs_skipped":      len(skipped_docs),
+                "prompt_version":  "v3.2",
+                "llm_model":       os.getenv("GENAI_MODEL", "gpt-4o-mini"),
+                "input_tokens":    input_tokens,
+                "docs_processed":  len(prepared),
+                "docs_skipped":    len(skipped_docs),
             },
         )
 
@@ -588,7 +653,10 @@ class DocumentAnalyzer:
             indent_id         = indent_id,
             indent_title      = indent_title,
             documents         = documents,
-            analyzer_metadata = {"prompt_version": "v3", "docs_processed": 0},
+            analyzer_metadata = {
+                "prompt_version": "v3.2",
+                "docs_processed": 0,
+            },
         )
 
     def _safe_document_type(self, value):
