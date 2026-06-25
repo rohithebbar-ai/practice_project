@@ -140,11 +140,29 @@ Approval Note:
 PART 2: CROSS-DOCUMENT SYNTHESIS RULES
 ════════════════════════════════════════════════════════════
 
-procurement_type: a short label for the category of work.
-Examples: "Civil - Drain Installation", "Canteen Services",
-"Electrical Maintenance", "Supply of Aggregates",
-"NDT Testing Services", "Housekeeping Services",
-"Structural Fabrication", "Water Tank Supply & Installation"
+procurement_type: MANDATORY — you must always return this field, never null.
+Derive it from the package description, scope of work, or indent title.
+Format: "Category - Specific Work" (e.g. "Civil - Drain Installation")
+or just "Category" if sub-type is unclear (e.g. "Canteen Services").
+
+Examples by document signals:
+- Indent title contains "precast drain" → "Civil - Drain Installation"
+- Indent title contains "canteen"       → "Canteen Services"
+- Indent title contains "road"          → "Civil - Road Construction"
+- Indent title contains "water tank"    → "Supply - Water Tank Installation"
+- Indent title contains "NDT"           → "NDT Testing Services"
+- Indent title contains "housekeeping"  → "Housekeeping Services"
+- Indent title contains "fabrication"   → "Structural Fabrication"
+- Indent title contains "electrical"    → "Electrical Maintenance"
+- Indent title contains "aggregate"     → "Supply - Aggregates"
+- Indent title contains "locker"        → "Supply - Furniture & Fixtures"
+- Indent title contains "blasting"      → "Civil - Rock Excavation"
+- Indent title contains "ARC" or "rate contract" → "Annual Rate Contract - [discipline]"
+- Indent title contains "infrastructure" → "Civil - Infrastructure Works"
+- Indent title contains "manpower"      → "Manpower Services"
+
+If none of the above match, infer from the BOQ items or scope of work.
+Do NOT return null — always make a best-effort determination.
 
 Cross-document checks (flag in weak_items if found):
 - BOQ scope does not match Technical Spec scope.
@@ -204,7 +222,7 @@ EVIDENCE RULES:
 Return this exact JSON structure:
 {
   "procurement_summary": {
-    "procurement_type": string | null,
+    "procurement_type": string,  // REQUIRED — never null, always infer from context
     "package_description": string | null,
     "scope_of_work": string | null,
     "location": string | null,
