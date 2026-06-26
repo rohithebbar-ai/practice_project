@@ -1,9 +1,9 @@
 """
-pipeline_analyze.py  (v3)
-─────────────────────────
-One LLM call per indent.
-Saves one IndentExtraction JSON per indent (not per document).
-pipeline_consolidate.py is no longer needed.
+pipeline_analyze.py  (v4)
+──────────────────────────
+Reads from:  pipeline_outputs/01_parsed/
+Writes to:   pipeline_outputs/02_cleaned/
+             pipeline_outputs/03_extractions/
 """
 
 from pathlib import Path
@@ -12,19 +12,14 @@ from collections import defaultdict
 from src.document_analyzer import DocumentAnalyzer
 from src.storage import ensure_dir, save_model, save_error, load_json, safe_name
 from src.text_cleaner import clean_document_text
+from src.pipeline_paths import PATHS
 
 
-PARSED_DIR      = Path("data/parsed_text")
-PARSER_META_DIR = Path("data/parsed_text_metadata")
-INDENT_OUTPUT_DIR = Path("data/extracted_json/indent_level")   # one JSON per indent
-CLEANED_DIR     = Path("data/cleaned_text")
-ERROR_DIR       = Path("logs/error_logs")
-
-
-def _load_parser_metadata(indent_id: str, parsed_file_name: str) -> dict:
-    original_name = parsed_file_name.replace(".txt", "")
+def _load_parser_metadata(safe_indent_id: str, parsed_file_name: str) -> dict:
     meta_path = (
-        PARSER_META_DIR / indent_id / f"{original_name}.metadata.json"
+        PATHS.parsed_metadata
+        / safe_indent_id
+        / f"{safe_name(parsed_file_name)}.metadata.json"
     )
     if meta_path.exists():
         return load_json(meta_path)
@@ -33,13 +28,13 @@ def _load_parser_metadata(indent_id: str, parsed_file_name: str) -> dict:
 
 def analyze_parsed_documents() -> None:
     analyzer = DocumentAnalyzer()
-    ensure_dir(INDENT_OUTPUT_DIR)
+    PATHS.ensure_all()
 
-    # ── Group all txt files by indent ────────────────────────────────────────
-    txt_files = list(PARSED_DIR.rglob("*.txt"))
+    # Group all txt files by indent
+    txt_files = list(PATHS.parsed.rglob("*.txt"))
     print(f"Found {len(txt_files)} parsed text files\n")
 
-    indent_to_files = defaultdict(list)
+    indent_to_files: dict = defaultdict(list)
     for txt_path in txt_files:
         indent_id = txt_path.parent.name
         indent_to_files[indent_id].append(txt_path)
@@ -50,19 +45,36 @@ def analyze_parsed_documents() -> None:
     total_docs       = 0
     total_chars_sent = 0
 
-    # ── Process one indent at a time ─────────────────────────────────────────
     for indent_id, txt_paths in sorted(indent_to_files.items()):
         safe_id = safe_name(indent_id)
+
         print(f"\n{'='*60}")
         print(f"INDENT: {indent_id}")
         print(f"Documents: {len(txt_paths)}")
         print(f"{'='*60}")
 
-        # Skip if already processed
-        output_path = INDENT_OUTPUT_DIR / f"{safe_id}_extraction.json"
+        # Skip if already processed successfully
+        output_path = PATHS.extractions / f"{safe_id}_extraction.json"
         if output_path.exists():
-            print(f"  [CACHED] Already processed — skipping")
-            continue
+            # Check it's not empty
+            try:
+                existing = load_json(output_path)
+                ps = existing.get("procurement_summary", {}) or {}
+                has_content = any([
+                    ps.get("scope_of_work"),
+                    ps.get("package_description"),
+                    any(d.get("document_summary")
+                        for d in existing.get("documents", [])),
+                    len(existing.get("good_practices", [])) > 0,
+                ])
+                if has_content:
+                    print(f"  [CACHED] Already processed — skipping")
+                    continue
+                else:
+                    print(f"  [RERUN] Cached file is empty — reprocessing")
+                    output_path.unlink()
+            except Exception:
+                pass
 
         documents = []
 
@@ -81,14 +93,14 @@ def analyze_parsed_documents() -> None:
                     f"{len(raw_text):,} → {len(document_text):,} chars"
                 )
 
-                # Save cleaned text for inspection
-                cleaned_dir = CLEANED_DIR / safe_id
+                # Save cleaned text
+                cleaned_dir = PATHS.cleaned / safe_id
                 ensure_dir(cleaned_dir)
                 (cleaned_dir / txt_path.name).write_text(
                     document_text, encoding="utf-8"
                 )
 
-                # Rule-based classification (0 LLM calls)
+                # Rule-based classification
                 classification = analyzer.classify_rule_based(
                     document_name=document_name,
                     document_text=document_text,
@@ -99,9 +111,7 @@ def analyze_parsed_documents() -> None:
                     f"({classification.confidence.value})"
                 )
 
-                parser_metadata = _load_parser_metadata(
-                    indent_id, txt_path.name
-                )
+                parser_metadata = _load_parser_metadata(safe_id, txt_path.name)
 
                 documents.append({
                     "document_name":   document_name,
@@ -115,7 +125,7 @@ def analyze_parsed_documents() -> None:
                 print(f"  [ERROR] Failed processing {txt_path.name}: {exc}")
                 save_error(
                     error=exc,
-                    output_dir=ERROR_DIR,
+                    output_dir=PATHS.logs,
                     file_stem=f"clean_{safe_id}_{document_name}",
                     extra={"txt_path": str(txt_path)},
                 )
@@ -124,7 +134,7 @@ def analyze_parsed_documents() -> None:
             print(f"  [SKIP] No valid documents for {indent_id}")
             continue
 
-        # ── ONE LLM call for entire indent ───────────────────────────────────
+        # ONE LLM call for entire indent
         try:
             indent_extraction = analyzer.extract_indent(
                 indent_id=safe_id,
@@ -140,17 +150,17 @@ def analyze_parsed_documents() -> None:
             print(f"  [ERROR] extract_indent failed: {exc}")
             save_error(
                 error=exc,
-                output_dir=ERROR_DIR,
+                output_dir=PATHS.logs,
                 file_stem=f"extract_{safe_id}",
                 extra={"indent_id": indent_id},
             )
             continue
 
-        # ── Save ONE JSON per indent ─────────────────────────────────────────
+        # Save ONE JSON per indent
         try:
             saved_path = save_model(
                 model=indent_extraction,
-                output_dir=INDENT_OUTPUT_DIR,
+                output_dir=PATHS.extractions,
                 file_stem=f"{safe_id}_extraction",
             )
             print(f"  [SAVED] {saved_path}")
@@ -158,11 +168,10 @@ def analyze_parsed_documents() -> None:
             print(f"  [ERROR] Failed saving: {exc}")
             save_error(
                 error=exc,
-                output_dir=ERROR_DIR,
+                output_dir=PATHS.logs,
                 file_stem=f"save_{safe_id}",
             )
 
-    # ── Summary ──────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"pipeline_analyze complete")
     print(f"  LLM calls made : {total_llm_calls}")

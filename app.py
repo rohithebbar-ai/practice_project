@@ -339,10 +339,13 @@ def folder_upload_component(key: str = "folder_upload"):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_standard_practice():
-    for p in [
-        Path("data/outputs/best_practice_standard.json"),
-        Path("../data/outputs/best_practice_standard.json"),
-    ]:
+    from src.pipeline_paths import PATHS
+    paths_to_try = [
+        PATHS.best_practice_standard,
+        Path("pipeline_outputs/05_standard/best_practice_standard.json"),
+        Path("data/outputs/best_practice_standard.json"),   # legacy fallback
+    ]
+    for p in paths_to_try:
         if p.exists():
             with open(p, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -494,7 +497,7 @@ standard = load_standard_practice()
 if not standard:
     st.error(
         "**Standard practice file not found.**\n\n"
-        "Run the full pipeline first to generate `data/outputs/best_practice_standard.json`."
+        "Run the full pipeline first to generate `pipeline_outputs/05_standard/best_practice_standard.json`."
     )
     st.stop()
 
