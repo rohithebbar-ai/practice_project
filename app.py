@@ -1,9 +1,15 @@
 """
-app.py — Procurement Indent Analyser  (v2)
+app.py — Procurement Indent Analyser  (v3)
 Three upload modes:
   1. Folder upload  — via webkitdirectory HTML injection (Chrome/Edge)
   2. Multi-file     — select multiple files manually
   3. Single file    — analyse one document
+
+Changes from v2:
+  - LLM-based comparison (semantic, not keyword matching)
+  - New tabs: Good Practices + Weak Areas
+  - Stats bar shows good/weak practice counts
+  - Loading message for comparison LLM call
 """
 
 import streamlit as st
@@ -82,31 +88,30 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     padding:0.6rem 0.9rem;border-radius:0 6px 6px 0;
     margin-bottom:0.5rem;font-size:0.875rem;color:#9A3412;
 }
+.good-item {
+    background:#F0FDF4;border-left:3px solid #22C55E;
+    padding:0.6rem 0.9rem;border-radius:0 6px 6px 0;
+    margin-bottom:0.5rem;font-size:0.875rem;color:#166534;
+}
+.weak-item {
+    background:#FFF1F2;border-left:3px solid #F43F5E;
+    padding:0.6rem 0.9rem;border-radius:0 6px 6px 0;
+    margin-bottom:0.5rem;font-size:0.875rem;color:#881337;
+}
 .file-chip {
     display:inline-block;background:#F3F4F6;border-radius:20px;
     padding:0.25rem 0.75rem;font-size:0.75rem;color:#374151;
     margin:0.2rem;font-family:'JetBrains Mono',monospace;
 }
-.folder-drop-zone {
-    background:white;border:2px dashed #D1D5DB;border-radius:12px;
-    padding:2.5rem 2rem;text-align:center;transition:border-color 0.2s;
-}
-.folder-drop-zone:hover { border-color:#3B82F6; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ── Folder upload component ───────────────────────────────────────────────────
 def folder_upload_component(key: str = "folder_upload"):
-    """
-    Injects a webkitdirectory input into the page.
-    Returns list of {name, content_b64, size} dicts via Streamlit component value.
-    Works in Chrome and Edge. Falls back gracefully in Firefox.
-    """
     component_html = """
     <style>
     * { box-sizing: border-box; font-family: 'Inter', 'Segoe UI', sans-serif; }
-
     .folder-zone {
         border: 2px dashed #D1D5DB;
         border-radius: 12px;
@@ -137,7 +142,6 @@ def folder_upload_component(key: str = "folder_upload"):
         transition: background 0.15s;
     }
     .folder-btn:hover { background: #2D4A7A; }
-
     .file-list {
         margin-top: 1rem;
         text-align: left;
@@ -179,21 +183,12 @@ def folder_upload_component(key: str = "folder_upload"):
         transition: width 0.3s;
         width: 0%;
     }
-    .status-msg {
-        font-size: 0.8rem;
-        color: #6B7280;
-        margin-top: 0.5rem;
-        display: none;
-    }
+    .status-msg { font-size: 0.8rem; color: #6B7280; margin-top: 0.5rem; display: none; }
     .compat-warning {
-        font-size: 0.75rem;
-        color: #D97706;
-        background: #FFFBEB;
-        border: 1px solid #FDE68A;
-        border-radius: 6px;
-        padding: 0.4rem 0.7rem;
-        margin-top: 0.75rem;
-        display: none;
+        font-size: 0.75rem; color: #D97706;
+        background: #FFFBEB; border: 1px solid #FDE68A;
+        border-radius: 6px; padding: 0.4rem 0.7rem;
+        margin-top: 0.75rem; display: none;
     }
     </style>
 
@@ -201,15 +196,18 @@ def folder_upload_component(key: str = "folder_upload"):
            accept=".pdf,.docx,.xlsx,.xls,.xlsm,.txt"
            style="display:none;">
 
-    <div class="folder-zone" id="dropZone" onclick="document.getElementById('folderInput').click()">
+    <div class="folder-zone" id="dropZone"
+         onclick="document.getElementById('folderInput').click()">
         <div class="folder-icon">📁</div>
         <div class="folder-title">Click to select indent folder</div>
         <div class="folder-sub">Or drag and drop the folder here</div>
-        <div class="folder-btn" onclick="event.stopPropagation();document.getElementById('folderInput').click()">
+        <div class="folder-btn"
+             onclick="event.stopPropagation();
+                      document.getElementById('folderInput').click()">
             Browse Folder
         </div>
         <div class="compat-warning" id="compatWarn">
-            ⚠ Folder upload requires Chrome or Edge. Use multi-file upload in Firefox.
+            ⚠ Folder upload requires Chrome or Edge.
         </div>
         <div class="progress-bar" id="progressBar">
             <div class="progress-fill" id="progressFill"></div>
@@ -219,111 +217,89 @@ def folder_upload_component(key: str = "folder_upload"):
     </div>
 
     <script>
-    // Check browser support
     const input = document.getElementById('folderInput');
     const compatWarn = document.getElementById('compatWarn');
     if (!('webkitdirectory' in input)) {
         compatWarn.style.display = 'block';
     }
-
     const ALLOWED = ['pdf','docx','xlsx','xls','xlsm','txt'];
-
-    function getExt(name) {
-        return name.split('.').pop().toLowerCase();
-    }
-
+    function getExt(name) { return name.split('.').pop().toLowerCase(); }
     function formatSize(bytes) {
         if (bytes < 1024) return bytes + ' B';
         if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
         return (bytes/(1024*1024)).toFixed(1) + ' MB';
     }
-
     async function processFiles(files) {
-        const filtered = Array.from(files).filter(f => ALLOWED.includes(getExt(f.name)));
-
+        const filtered = Array.from(files).filter(
+            f => ALLOWED.includes(getExt(f.name))
+        );
         if (filtered.length === 0) {
             document.getElementById('statusMsg').style.display = 'block';
-            document.getElementById('statusMsg').textContent = 'No supported files found in folder.';
+            document.getElementById('statusMsg').textContent =
+                'No supported files found.';
             return;
         }
-
-        // Show progress
         const bar  = document.getElementById('progressBar');
         const fill = document.getElementById('progressFill');
         const msg  = document.getElementById('statusMsg');
         const list = document.getElementById('fileList');
-
-        bar.style.display  = 'block';
-        msg.style.display  = 'block';
-        list.innerHTML     = '';
-
+        bar.style.display = 'block';
+        msg.style.display = 'block';
+        list.innerHTML    = '';
         const results = [];
-
         for (let i = 0; i < filtered.length; i++) {
             const file = filtered[i];
-            msg.textContent = `Reading ${file.name}... (${i+1}/${filtered.length})`;
-            fill.style.width = ((i+1) / filtered.length * 100) + '%';
-
+            msg.textContent =
+                `Reading ${file.name}... (${i+1}/${filtered.length})`;
+            fill.style.width =
+                ((i+1) / filtered.length * 100) + '%';
             const b64 = await new Promise((resolve) => {
                 const reader = new FileReader();
                 reader.onload = e => {
                     const arr = new Uint8Array(e.target.result);
                     let binary = '';
-                    for (let j = 0; j < arr.byteLength; j++) binary += String.fromCharCode(arr[j]);
+                    for (let j = 0; j < arr.byteLength; j++)
+                        binary += String.fromCharCode(arr[j]);
                     resolve(btoa(binary));
                 };
                 reader.readAsArrayBuffer(file);
             });
-
             results.push({
-                name:        file.name,
-                content_b64: b64,
-                size:        file.size,
-                ext:         getExt(file.name),
+                name: file.name, content_b64: b64,
+                size: file.size, ext: getExt(file.name),
             });
-
-            // Show file in list
             const ext = getExt(file.name).toUpperCase();
             list.innerHTML += `
                 <div class="file-row">
                     <span class="file-ext">${ext}</span>
                     <span>${file.name}</span>
-                    <span style="margin-left:auto;color:#9CA3AF;font-size:0.72rem;">
+                    <span style="margin-left:auto;color:#9CA3AF;
+                                 font-size:0.72rem;">
                         ${formatSize(file.size)}
                     </span>
                 </div>`;
         }
-
         msg.textContent = `✓ ${filtered.length} file(s) ready`;
-
-        // Send to Streamlit
         window.parent.postMessage({
-            type:  'streamlit:setComponentValue',
-            value: results,
+            type: 'streamlit:setComponentValue', value: results,
         }, '*');
     }
-
-    // File input change
-    document.getElementById('folderInput').addEventListener('change', function(e) {
-        processFiles(e.target.files);
-    });
-
-    // Drag and drop
+    document.getElementById('folderInput').addEventListener(
+        'change', e => processFiles(e.target.files)
+    );
     const zone = document.getElementById('dropZone');
-    zone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        zone.classList.add('dragover');
+    zone.addEventListener('dragover', e => {
+        e.preventDefault(); zone.classList.add('dragover');
     });
-    zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-    zone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        zone.classList.remove('dragover');
-        const items = e.dataTransfer.items;
+    zone.addEventListener('dragleave',
+        () => zone.classList.remove('dragover')
+    );
+    zone.addEventListener('drop', e => {
+        e.preventDefault(); zone.classList.remove('dragover');
         const files = [];
-        if (items) {
-            for (let item of items) {
+        if (e.dataTransfer.items) {
+            for (let item of e.dataTransfer.items)
                 if (item.kind === 'file') files.push(item.getAsFile());
-            }
         } else {
             for (let f of e.dataTransfer.files) files.push(f);
         }
@@ -331,7 +307,6 @@ def folder_upload_component(key: str = "folder_upload"):
     });
     </script>
     """
-
     result = components.html(component_html, height=350, scrolling=False)
     return result
 
@@ -343,7 +318,7 @@ def load_standard_practice():
     paths_to_try = [
         PATHS.best_practice_standard,
         Path("pipeline_outputs/05_standard/best_practice_standard.json"),
-        Path("data/outputs/best_practice_standard.json"),   # legacy fallback
+        Path("data/outputs/best_practice_standard.json"),
     ]
     for p in paths_to_try:
         if p.exists():
@@ -353,7 +328,12 @@ def load_standard_practice():
 
 
 def status_icon(status):
-    return {"pass": "✅", "fail": "❌", "warning": "⚠️", "info": "ℹ️"}.get(status, "•")
+    return {
+        "pass":    "✅",
+        "fail":    "❌",
+        "warning": "⚠️",
+        "info":    "ℹ️",
+    }.get(status, "•")
 
 
 def grade_color(grade):
@@ -381,24 +361,27 @@ def render_findings(findings):
         return
     for f in findings:
         icon  = status_icon(f.status)
-        color = {"pass": "#059669","fail": "#DC2626",
-                 "warning":"#D97706","info":"#6B7280"}.get(f.status, "#6B7280")
+        color = {
+            "pass":    "#059669",
+            "fail":    "#DC2626",
+            "warning": "#D97706",
+            "info":    "#6B7280",
+        }.get(f.status, "#6B7280")
         st.markdown(f"""
         <div style="display:flex;gap:0.6rem;padding:0.55rem 0;
-                    border-bottom:1px solid #F3F4F6;align-items:flex-start;">
+                    border-bottom:1px solid #F3F4F6;
+                    align-items:flex-start;">
             <span style="font-size:1rem;margin-top:0.05rem;">{icon}</span>
             <div>
-                <div style="font-size:0.875rem;font-weight:500;color:#111827;">{f.title}</div>
-                <div style="font-size:0.78rem;color:#6B7280;margin-top:0.1rem;">{f.detail}</div>
+                <div style="font-size:0.875rem;font-weight:500;
+                            color:#111827;">{f.title}</div>
+                <div style="font-size:0.78rem;color:#6B7280;
+                            margin-top:0.1rem;">{f.detail}</div>
             </div>
         </div>""", unsafe_allow_html=True)
 
 
 def run_pipeline(file_items, indent_name):
-    """
-    file_items: list of {name, content_b64} OR Streamlit UploadedFile objects
-    Returns IndentExtraction as dict.
-    """
     from src.document_parser import parse_file
     from src.text_cleaner import clean_document_text
     from src.document_analyzer import DocumentAnalyzer
@@ -411,7 +394,6 @@ def run_pipeline(file_items, indent_name):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i, item in enumerate(file_items):
-            # Normalise: item may be UploadedFile or dict with content_b64
             if hasattr(item, "name"):
                 fname   = item.name
                 content = item.getvalue()
@@ -463,7 +445,7 @@ def run_pipeline(file_items, indent_name):
     spinner_msg = st.empty()
     spinner_msg.markdown(
         '<p style="font-size:0.875rem;color:#374151;font-weight:500;">'
-        '🤖 Analysing with AI (1 LLM call)...</p>',
+        '🤖 Extracting indent data (1 LLM call)...</p>',
         unsafe_allow_html=True
     )
 
@@ -489,7 +471,8 @@ def run_pipeline(file_items, indent_name):
 st.markdown("""
 <div class="app-header">
     <h1>📋 Procurement Indent Analyser</h1>
-    <p>Upload your indent documents and compare against procurement best practices</p>
+    <p>Upload your indent documents and compare against procurement
+       best practices</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -497,23 +480,33 @@ standard = load_standard_practice()
 if not standard:
     st.error(
         "**Standard practice file not found.**\n\n"
-        "Run the full pipeline first to generate `pipeline_outputs/05_standard/best_practice_standard.json`."
+        "Run the full pipeline first to generate "
+        "`pipeline_outputs/05_standard/best_practice_standard.json`."
     )
     st.stop()
 
-# Standard stats bar
+# ── Stats bar ─────────────────────────────────────────────────────────────────
 meta = standard.get("_metadata", {})
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 for col, val, label in [
-    (c1, meta.get("source_indents", "?"),                    "Indents in Standard"),
-    (c2, len(standard.get("mandatory_practices", [])),        "Mandatory Practices"),
-    (c3, len(standard.get("documentation_requirements", [])), "Doc Requirements"),
-    (c4, len(standard.get("risk_controls", [])),              "Risk Controls"),
+    (c1, meta.get("source_indents", "?"),
+         "Indents in Standard"),
+    (c2, len(standard.get("mandatory_practices", [])),
+         "Mandatory Practices"),
+    (c3, len(standard.get("documentation_requirements", [])),
+         "Doc Requirements"),
+    (c4, len(standard.get("risk_controls", [])),
+         "Risk Controls"),
+    (c5, len(standard.get("common_good_practices", [])),
+         "Good Practices"),
+    (c6, len(standard.get("common_weak_practices", [])),
+         "Known Weak Areas"),
 ]:
     with col:
         st.markdown(f"""
         <div class="metric-tile">
-            <div class="metric-value" style="color:#1B2A4A;">{val}</div>
+            <div class="metric-value"
+                 style="color:#1B2A4A;">{val}</div>
             <div class="metric-label">{label}</div>
         </div>""", unsafe_allow_html=True)
 
@@ -532,31 +525,30 @@ mode = st.radio(
 indent_name = st.text_input(
     "Indent name (optional)",
     placeholder="e.g. Indent - 36156 - Precast Drains",
-    label_visibility="visible",
 )
 if not indent_name:
     indent_name = "New Indent"
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# ── File collection based on mode ─────────────────────────────────────────────
-file_items  = []   # list of UploadedFile or {name, content_b64}
+# ── File collection ───────────────────────────────────────────────────────────
+file_items  = []
 files_ready = False
 
 if mode == "📁 Folder Upload":
     st.markdown("""
-    <div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:8px;
-                padding:0.6rem 1rem;font-size:0.8rem;color:#92400E;margin-bottom:1rem;">
-        💡 <b>Chrome / Edge only.</b> Click "Browse Folder", navigate to your indent folder,
-        and select it. All supported files inside will be loaded automatically.
-        Use Multi-File Upload if you're on Firefox.
+    <div style="background:#FFFBEB;border:1px solid #FDE68A;
+                border-radius:8px;padding:0.6rem 1rem;
+                font-size:0.8rem;color:#92400E;margin-bottom:1rem;">
+        💡 <b>Chrome / Edge only.</b> Click "Browse Folder", select
+        your indent folder. Use Multi-File Upload in Firefox.
     </div>
     """, unsafe_allow_html=True)
 
     folder_data = folder_upload_component(key="folder_uploader")
 
     if folder_data and isinstance(folder_data, list) and len(folder_data) > 0:
-        file_items  = folder_data   # list of {name, content_b64, size, ext}
+        file_items  = folder_data
         files_ready = True
         chips = "".join(
             f'<span class="file-chip">📄 {f["name"]}</span>'
@@ -571,8 +563,8 @@ if mode == "📁 Folder Upload":
 elif mode == "📄 Multi-File Upload":
     st.markdown("""
     <div style="font-size:0.82rem;color:#6B7280;margin-bottom:0.5rem;">
-        Open your indent folder in Explorer, press <b>Ctrl+A</b> to select all,
-        then drag into the uploader below — or click Browse.
+        Open your indent folder, press <b>Ctrl+A</b> to select all,
+        then drag into the uploader below.
     </div>
     """, unsafe_allow_html=True)
 
@@ -595,7 +587,7 @@ elif mode == "📄 Multi-File Upload":
         )
         st.caption(f"{len(uploaded)} file(s) selected")
 
-else:  # Single file
+else:
     single = st.file_uploader(
         "Select a single procurement document",
         type=["pdf", "docx", "xlsx", "xls", "xlsm", "txt"],
@@ -627,7 +619,16 @@ if analyse_btn and files_ready:
         st.stop()
 
     from src.indent_comparator import compare_indent_to_standard
+
+    compare_msg = st.empty()
+    compare_msg.markdown(
+        '<p style="font-size:0.875rem;color:#374151;font-weight:500;">'
+        '🔍 Comparing against best practice standard (1 LLM call)...</p>',
+        unsafe_allow_html=True
+    )
     report = compare_indent_to_standard(extraction, standard)
+    compare_msg.empty()
+
     st.session_state["report"]     = report
     st.session_state["extraction"] = extraction
 
@@ -636,17 +637,21 @@ if "report" in st.session_state:
     report     = st.session_state["report"]
     extraction = st.session_state["extraction"]
 
-    st.markdown(f"## Analysis: {report.indent_id.replace('_', ' ')}")
+    st.markdown(
+        f"## Analysis: {report.indent_id.replace('_', ' ')}"
+    )
 
     # Score row
     col_score, col_type, col_recs, col_gaps = st.columns([1, 2, 2, 2])
     with col_score:
         st.markdown(f"""
         <div class="score-card">
-            <div class="score-number" style="color:{score_color(report.overall_score)};">
+            <div class="score-number"
+                 style="color:{score_color(report.overall_score)};">
                 {report.overall_score}
             </div>
-            <div style="font-size:0.72rem;color:#9CA3AF;margin-top:0.25rem;">out of 100</div>
+            <div style="font-size:0.72rem;color:#9CA3AF;
+                        margin-top:0.25rem;">out of 100</div>
             <div class="score-grade" style="
                 background:{grade_color(report.overall_grade)}22;
                 color:{grade_color(report.overall_grade)};">
@@ -657,7 +662,8 @@ if "report" in st.session_state:
         st.markdown(f"""
         <div class="metric-tile" style="height:100%;">
             <div class="metric-label">Procurement Type</div>
-            <div style="font-size:0.95rem;font-weight:600;color:#111827;margin-top:0.4rem;">
+            <div style="font-size:0.95rem;font-weight:600;
+                        color:#111827;margin-top:0.4rem;">
                 {report.procurement_type}
             </div>
         </div>""", unsafe_allow_html=True)
@@ -665,40 +671,65 @@ if "report" in st.session_state:
         st.markdown(f"""
         <div class="metric-tile" style="height:100%;">
             <div class="metric-label">Recommendations</div>
-            <div class="metric-value" style="color:#DC2626;">{len(report.recommendations)}</div>
+            <div class="metric-value"
+                 style="color:#DC2626;">
+                {len(report.recommendations)}
+            </div>
         </div>""", unsafe_allow_html=True)
     with col_gaps:
         st.markdown(f"""
         <div class="metric-tile" style="height:100%;">
             <div class="metric-label">Gaps Found</div>
-            <div class="metric-value" style="color:#D97706;">{len(report.gaps)}</div>
+            <div class="metric-value"
+                 style="color:#D97706;">
+                {len(report.gaps)}
+            </div>
         </div>""", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # Strengths
+    if report.strengths:
+        st.markdown("### ⭐ Strengths")
+        for s in report.strengths:
+            st.markdown(
+                f'<div class="good-item">✓ {s}</div>',
+                unsafe_allow_html=True
+            )
+        st.markdown("<br>", unsafe_allow_html=True)
 
     # Recommendations
     if report.recommendations:
         st.markdown("### 🎯 Recommendations")
         for rec in report.recommendations:
-            st.markdown(f'<div class="rec-item">→ {rec}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="rec-item">→ {rec}</div>',
+                unsafe_allow_html=True
+            )
         st.markdown("<br>", unsafe_allow_html=True)
 
     # Cross-doc issues
     if report.cross_doc_issues:
         st.markdown("### ⚠️ Cross-Document Issues")
         for issue in report.cross_doc_issues:
-            st.markdown(f'<div class="issue-item">⚠ {issue}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="issue-item">⚠ {issue}</div>',
+                unsafe_allow_html=True
+            )
         st.markdown("<br>", unsafe_allow_html=True)
 
-    # Tabs
+    # ── Tabs ──────────────────────────────────────────────────────────────────
     st.markdown("### Detailed Findings")
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         f"✅ Mandatory ({len(report.mandatory_findings)})",
         f"📁 Documents ({len(report.documentation_findings)})",
         f"🛡 Risks ({len(report.risk_findings)})",
         f"🏢 Vendors ({len(report.vendor_findings)})",
         f"📋 Approvals ({len(report.approval_findings)})",
         f"🏗 Structure ({len(report.structure_findings)})",
+        f"⭐ Good Practices ({len(report.good_practice_findings)})",
+        f"⚠️ Weak Areas ({len(report.weak_practice_findings)})",
     ])
     with tab1: render_findings(report.mandatory_findings)
     with tab2: render_findings(report.documentation_findings)
@@ -706,29 +737,33 @@ if "report" in st.session_state:
     with tab4: render_findings(report.vendor_findings)
     with tab5: render_findings(report.approval_findings)
     with tab6: render_findings(report.structure_findings)
+    with tab7: render_findings(report.good_practice_findings)
+    with tab8: render_findings(report.weak_practice_findings)
 
-    # Procurement summary
+    # ── Procurement summary ───────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     with st.expander("📊 Extracted Procurement Summary", expanded=False):
         ps = extraction.get("procurement_summary", {}) or {}
         fields = [
-            ("Package Description",     ps.get("package_description")),
-            ("Scope of Work",           ps.get("scope_of_work")),
-            ("Location",                ps.get("location")),
-            ("Discipline",              ps.get("discipline")),
-            ("Estimated Cost (Cr)",     ps.get("estimated_cost_crores")),
+            ("Package Description",      ps.get("package_description")),
+            ("Scope of Work",            ps.get("scope_of_work")),
+            ("Procurement Type",         ps.get("procurement_type")),
+            ("Location",                 ps.get("location")),
+            ("Discipline",               ps.get("discipline")),
+            ("Estimated Cost (Cr)",      ps.get("estimated_cost_crores")),
             ("Contract Period (months)", ps.get("contract_period_months")),
-            ("Order Required Date",     ps.get("order_required_date")),
-            ("Job Risk Category",       ps.get("job_risk_category")),
-            ("Is Single Party",         ps.get("is_single_party")),
-            ("Vendor Panel",            ps.get("vendor_panel")),
-            ("Term Sheet Type",         ps.get("term_sheet_type")),
-            ("Technical Spec Attached", ps.get("technical_spec_attached")),
-            ("HSE Plan Available",      ps.get("hse_plan_available")),
-            ("BOQ Surplus Checked",     ps.get("boq_surplus_checked")),
-            ("Approval Authority",      ps.get("approval_authority")),
-            ("Approval Date",           ps.get("indent_approval_date")),
-            ("Procurement Head",        ps.get("procurement_head")),
+            ("Order Required Date",      ps.get("order_required_date")),
+            ("Job Risk Category",        ps.get("job_risk_category")),
+            ("Is Single Party",          ps.get("is_single_party")),
+            ("Vendor Panel",             ps.get("vendor_panel")),
+            ("Vendor Count",             ps.get("vendor_count")),
+            ("Term Sheet Type",          ps.get("term_sheet_type")),
+            ("Technical Spec Attached",  ps.get("technical_spec_attached")),
+            ("HSE Plan Available",       ps.get("hse_plan_available")),
+            ("BOQ Surplus Checked",      ps.get("boq_surplus_checked")),
+            ("Approval Authority",       ps.get("approval_authority")),
+            ("Approval Date",            ps.get("indent_approval_date")),
+            ("Procurement Head",         ps.get("procurement_head")),
         ]
         ca, cb = st.columns(2)
         for i, (label, value) in enumerate(fields):
@@ -738,15 +773,18 @@ if "report" in st.session_state:
                           ("null", "none", "") else "—"
                 color = "#111827" if display != "—" else "#D1D5DB"
                 st.markdown(f"""
-                <div style="padding:0.4rem 0;border-bottom:1px solid #F3F4F6;">
+                <div style="padding:0.4rem 0;
+                            border-bottom:1px solid #F3F4F6;">
                     <span style="font-size:0.72rem;color:#9CA3AF;
-                                 text-transform:uppercase;letter-spacing:0.05em;">
+                                 text-transform:uppercase;
+                                 letter-spacing:0.05em;">
                         {label}</span><br>
-                    <span style="font-size:0.875rem;font-weight:500;color:{color};">
+                    <span style="font-size:0.875rem;font-weight:500;
+                                 color:{color};">
                         {display}</span>
                 </div>""", unsafe_allow_html=True)
 
-    # Downloads
+    # ── Downloads ─────────────────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     dl1, dl2 = st.columns(2)
     with dl1:
@@ -778,10 +816,12 @@ else:
     <div style="text-align:center;padding:3rem;color:#9CA3AF;">
         <div style="font-size:3rem;margin-bottom:1rem;">📂</div>
         <div style="font-size:1rem;font-weight:500;color:#6B7280;">
-            Select an upload method above, add your files, then click Analyse
+            Select an upload method above, add your files,
+            then click Analyse
         </div>
         <div style="font-size:0.85rem;margin-top:0.5rem;">
-            Supports BOQ, Procurement Tracker, Technical Spec, Safety Term Sheet, Approval Notes
+            Supports BOQ, Procurement Tracker, Technical Spec,
+            Safety Term Sheet, Approval Notes
         </div>
     </div>
     """, unsafe_allow_html=True)
