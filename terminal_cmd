@@ -1,0 +1,17 @@
+python -c "
+import json
+from pathlib import Path
+
+for f in Path('pipeline_outputs/03_extractions').rglob('*_extraction.json'):
+    data = json.loads(f.read_text(encoding='utf-8'))
+    ps = data.get('procurement_summary', {}) or {}
+    docs = data.get('documents', []) or []
+    has_content = any([
+        ps.get('procurement_type'),
+        ps.get('scope_of_work'),
+        ps.get('package_description'),
+        len(docs) > 0,
+    ])
+    if not has_content:
+        print(f'EMPTY: {f.name}')
+"
