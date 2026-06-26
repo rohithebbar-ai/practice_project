@@ -1,9 +1,13 @@
 """
-pipeline_analyze.py  (v4)
+pipeline_analyze.py  (v5)
 ──────────────────────────
 Reads from:  pipeline_outputs/01_parsed/
 Writes to:   pipeline_outputs/02_cleaned/
              pipeline_outputs/03_extractions/
+
+Changes from v4:
+  - Added MAX_BATCH to limit LLM calls per run (safe batching)
+  - Broader has_content check to avoid skipping valid extractions
 """
 
 from pathlib import Path
@@ -15,6 +19,12 @@ from src.text_cleaner import clean_document_text
 from src.pipeline_paths import PATHS
 
 
+# ── Batch limit ───────────────────────────────────────────────────────────────
+# Set to 5 for initial test run.
+# Once verified, change to 999 (or any large number) for full run.
+MAX_BATCH = 5
+
+
 def _load_parser_metadata(safe_indent_id: str, parsed_file_name: str) -> dict:
     meta_path = (
         PATHS.parsed_metadata
@@ -24,6 +34,26 @@ def _load_parser_metadata(safe_indent_id: str, parsed_file_name: str) -> dict:
     if meta_path.exists():
         return load_json(meta_path)
     return {}
+
+
+def _has_content(existing: dict) -> bool:
+    """
+    Broader content check — avoids skipping valid extractions
+    that have documents but no scope_of_work/package_description.
+    """
+    ps   = existing.get("procurement_summary", {}) or {}
+    docs = existing.get("documents", []) or []
+
+    return any([
+        ps.get("scope_of_work"),
+        ps.get("package_description"),
+        ps.get("procurement_type"),           # ← added
+        ps.get("document_types_present"),     # ← added
+        any(d.get("document_summary") for d in docs),
+        any(d.get("document_type") for d in docs),   # ← added
+        len(existing.get("good_practices", [])) > 0,
+        len(docs) > 0,                        # ← added
+    ])
 
 
 def analyze_parsed_documents() -> None:
@@ -40,12 +70,22 @@ def analyze_parsed_documents() -> None:
         indent_to_files[indent_id].append(txt_path)
 
     print(f"Found {len(indent_to_files)} indents\n")
+    print(f"Batch limit: {MAX_BATCH} indents this run\n")
 
     total_llm_calls  = 0
     total_docs       = 0
     total_chars_sent = 0
+    indents_run      = 0   # ← batch counter
 
     for indent_id, txt_paths in sorted(indent_to_files.items()):
+
+        # ── Batch limit check ─────────────────────────────────────────────────
+        if indents_run >= MAX_BATCH:
+            print(f"\n[BATCH LIMIT] Reached {MAX_BATCH} indents.")
+            print(f"Rerun the script to continue with remaining indents.")
+            print(f"Already-processed indents will be skipped (cached).\n")
+            break
+
         safe_id = safe_name(indent_id)
 
         print(f"\n{'='*60}")
@@ -53,21 +93,12 @@ def analyze_parsed_documents() -> None:
         print(f"Documents: {len(txt_paths)}")
         print(f"{'='*60}")
 
-        # Skip if already processed successfully
+        # ── Skip if already processed successfully ────────────────────────────
         output_path = PATHS.extractions / f"{safe_id}_extraction.json"
         if output_path.exists():
-            # Check it's not empty
             try:
                 existing = load_json(output_path)
-                ps = existing.get("procurement_summary", {}) or {}
-                has_content = any([
-                    ps.get("scope_of_work"),
-                    ps.get("package_description"),
-                    any(d.get("document_summary")
-                        for d in existing.get("documents", [])),
-                    len(existing.get("good_practices", [])) > 0,
-                ])
-                if has_content:
+                if _has_content(existing):
                     print(f"  [CACHED] Already processed — skipping")
                     continue
                 else:
@@ -145,6 +176,7 @@ def analyze_parsed_documents() -> None:
             total_chars_sent += indent_extraction.analyzer_metadata.get(
                 "total_input_chars", 0
             )
+            indents_run += 1   # ← increment only on successful LLM call
 
         except Exception as exc:
             print(f"  [ERROR] extract_indent failed: {exc}")
@@ -174,10 +206,11 @@ def analyze_parsed_documents() -> None:
 
     print(f"\n{'='*60}")
     print(f"pipeline_analyze complete")
-    print(f"  LLM calls made : {total_llm_calls}")
-    print(f"  Documents      : {total_docs}")
-    print(f"  Chars sent     : {total_chars_sent:,}")
-    print(f"  Approx tokens  : ~{total_chars_sent // 4:,}")
+    print(f"  Indents run this batch : {indents_run}")
+    print(f"  LLM calls made         : {total_llm_calls}")
+    print(f"  Documents processed    : {total_docs}")
+    print(f"  Chars sent             : {total_chars_sent:,}")
+    print(f"  Approx tokens          : ~{total_chars_sent // 4:,}")
     print(f"{'='*60}")
 
 
