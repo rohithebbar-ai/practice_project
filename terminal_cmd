@@ -15,3 +15,14 @@ for f in Path('pipeline_outputs/03_extractions').rglob('*_extraction.json'):
     if not has_content:
         print(f'EMPTY: {f.name}')
 "
+
+
+python -c "
+import json
+from pathlib import Path
+
+for f in list(Path('pipeline_outputs/03_extractions').rglob('*_extraction.json'))[:3]:
+    data = json.loads(f.read_text(encoding='utf-8'))
+    meta = data.get('analyzer_metadata', {})
+    print(f'{f.name[:50]}: {meta.get(\"prompt_version\", \"NOT FOUND\")}')
+"
