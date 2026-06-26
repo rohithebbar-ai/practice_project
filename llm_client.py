@@ -162,10 +162,49 @@ class LLMClient:
 
         return self._extract_text(response_json)
 
+    def _salvage_truncated_json(self, text: str) -> dict:
+        """
+        Attempt to recover a truncated JSON response by progressively
+        trimming to the last complete field and closing open braces.
+        """
+        salvage = text
+        for _ in range(50):
+            last_comma = salvage.rfind(",")
+            if last_comma == -1:
+                break
+
+            # Trim to last complete field
+            salvage = salvage[:last_comma]
+
+            # Count and close unclosed brackets/braces
+            open_braces   = salvage.count("{") - salvage.count("}")
+            open_brackets = salvage.count("[") - salvage.count("]")
+
+            if open_braces < 0 or open_brackets < 0:
+                continue
+
+            candidate = (
+                salvage
+                + "]" * open_brackets
+                + "}" * open_braces
+            )
+
+            try:
+                result = json.loads(candidate)
+                print(
+                    f"  [SALVAGE] Recovered truncated JSON "
+                    f"({len(text):,} → {len(candidate):,} chars)"
+                )
+                return result
+            except json.JSONDecodeError:
+                continue
+
+        raise RuntimeError("Salvage failed — JSON too truncated to recover.")
+
     def chat_json(
             self,
             messages,
-            max_tokens=12000
+            max_tokens=6000
     ):
         text = self.chat(
             messages,
@@ -185,7 +224,7 @@ class LLMClient:
 
         # ── Extract JSON object robustly ──────────────────────────────
         # Find first { and last } to handle any extra text before/after.
-        # This fixes cases where LLM adds explanation text around the JSON.
+        # This fixes cases where LLM adds explanation text around JSON.
         start = text.find("{")
         end   = text.rfind("}")
 
@@ -200,12 +239,27 @@ class LLMClient:
 
         text = text.strip()
 
+        # ── Try direct parse ──────────────────────────────────────────
         try:
             return json.loads(text)
 
         except json.JSONDecodeError as e:
-            start_err = max(e.pos - 500, 0)
-            end_err   = min(e.pos + 500, len(text))
+            print(
+                f"  [WARN] JSON parse failed at position {e.pos} "
+                f"(line {e.lineno}, col {e.colno}): {e.msg}"
+            )
+            print(f"  [WARN] Response length: {len(text):,} chars")
+            print(f"  [WARN] Around error: "
+                  f"{text[max(e.pos-100,0):min(e.pos+100,len(text))]}")
+
+            # ── Attempt salvage for truncated responses ───────────────
+            print("  [SALVAGE] Attempting to recover truncated JSON...")
+            try:
+                return self._salvage_truncated_json(text)
+            except RuntimeError:
+                pass
+
+            # ── All attempts failed — raise detailed error ────────────
             raise RuntimeError(
                 f"Failed to parse LLM JSON response.\n\n"
                 f"JSON error: {e.msg}\n"
@@ -214,5 +268,6 @@ class LLMClient:
                 f"Position: {e.pos}\n\n"
                 f"Character length: {len(text)}\n"
                 f"Starts with:\n{repr(text[:300])}\n\n"
-                f"Around error:\n{text[start_err:end_err]}"
+                f"Around error:\n"
+                f"{text[max(e.pos-500,0):min(e.pos+500,len(text))]}"
             ) from e
