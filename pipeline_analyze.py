@@ -5,11 +5,20 @@ Reads from:  pipeline_outputs/01_parsed/
 Writes to:   pipeline_outputs/02_cleaned/
              pipeline_outputs/03_extractions/
 
-Changes from v4:
-  - Added MAX_BATCH to limit LLM calls per run (safe batching)
-  - Broader has_content check to avoid skipping valid extractions
+Batch control:
+  Default: processes ALL indents (no limit)
+  Override via environment variable: set PIPELINE_BATCH=5
+  Override via command line: python pipeline_analyze.py --batch 5
+
+Examples:
+  python pipeline_analyze.py              → runs all indents
+  python pipeline_analyze.py --batch 5   → runs 5 at a time
+  set PIPELINE_BATCH=5 (Windows)         → runs 5 at a time
+  export PIPELINE_BATCH=5 (Linux/Mac)    → runs 5 at a time
 """
 
+import argparse
+import os
 from pathlib import Path
 from collections import defaultdict
 
@@ -18,11 +27,40 @@ from src.storage import ensure_dir, save_model, save_error, load_json, safe_name
 from src.text_cleaner import clean_document_text
 from src.pipeline_paths import PATHS
 
+# ── Current prompt version — update when prompts.py changes ──────────────────
+# This forces reprocessing of cached extractions when prompt changes.
+CURRENT_PROMPT_VERSION = "v3.3"
 
-# ── Batch limit ───────────────────────────────────────────────────────────────
-# Set to 5 for initial test run.
-# Once verified, change to 999 (or any large number) for full run.
-MAX_BATCH = 5
+
+def _get_max_batch() -> int:
+    """
+    Determine batch size from:
+    1. Command line argument --batch (highest priority)
+    2. Environment variable PIPELINE_BATCH
+    3. Default: 999999 (effectively unlimited — runs all indents)
+    """
+    # Check command line argument
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--batch", type=int, default=None)
+    args, _ = parser.parse_known_args()
+
+    if args.batch is not None:
+        print(f"  [BATCH] Using command line batch size: {args.batch}")
+        return args.batch
+
+    # Check environment variable
+    env_batch = os.getenv("PIPELINE_BATCH")
+    if env_batch is not None:
+        try:
+            batch = int(env_batch)
+            print(f"  [BATCH] Using environment variable batch size: {batch}")
+            return batch
+        except ValueError:
+            print(f"  [WARN] Invalid PIPELINE_BATCH value: {env_batch}, using unlimited")
+
+    # Default: run all
+    print(f"  [BATCH] No batch limit set — running all indents")
+    return 999_999
 
 
 def _load_parser_metadata(safe_indent_id: str, parsed_file_name: str) -> dict:
@@ -40,24 +78,38 @@ def _has_content(existing: dict) -> bool:
     """
     Broader content check — avoids skipping valid extractions
     that have documents but no scope_of_work/package_description.
+    Also checks prompt version to force reprocess when prompt changes.
     """
+    # Check prompt version — reprocess if prompt has changed
+    cached_version = existing.get(
+        "analyzer_metadata", {}
+    ).get("prompt_version", "")
+
+    if cached_version != CURRENT_PROMPT_VERSION:
+        print(
+            f"  [RERUN] Prompt version changed "
+            f"({cached_version} → {CURRENT_PROMPT_VERSION})"
+        )
+        return False
+
     ps   = existing.get("procurement_summary", {}) or {}
     docs = existing.get("documents", []) or []
 
     return any([
         ps.get("scope_of_work"),
         ps.get("package_description"),
-        ps.get("procurement_type"),           # ← added
-        ps.get("document_types_present"),     # ← added
+        ps.get("procurement_type"),
+        ps.get("document_types_present"),
         any(d.get("document_summary") for d in docs),
-        any(d.get("document_type") for d in docs),   # ← added
+        any(d.get("document_type") for d in docs),
         len(existing.get("good_practices", [])) > 0,
-        len(docs) > 0,                        # ← added
+        len(docs) > 0,
     ])
 
 
 def analyze_parsed_documents() -> None:
-    analyzer = DocumentAnalyzer()
+    analyzer  = DocumentAnalyzer()
+    max_batch = _get_max_batch()
     PATHS.ensure_all()
 
     # Group all txt files by indent
@@ -69,29 +121,34 @@ def analyze_parsed_documents() -> None:
         indent_id = txt_path.parent.name
         indent_to_files[indent_id].append(txt_path)
 
-    print(f"Found {len(indent_to_files)} indents\n")
-    print(f"Batch limit: {MAX_BATCH} indents this run\n")
+    total_available = len(indent_to_files)
+    print(f"Found {total_available} indents\n")
 
     total_llm_calls  = 0
     total_docs       = 0
     total_chars_sent = 0
-    indents_run      = 0   # ← batch counter
+    indents_run      = 0
 
     for indent_id, txt_paths in sorted(indent_to_files.items()):
 
         # ── Batch limit check ─────────────────────────────────────────────────
-        if indents_run >= MAX_BATCH:
-            print(f"\n[BATCH LIMIT] Reached {MAX_BATCH} indents.")
-            print(f"Rerun the script to continue with remaining indents.")
-            print(f"Already-processed indents will be skipped (cached).\n")
+        if indents_run >= max_batch:
+            remaining = total_available - indents_run
+            cached    = sum(
+                1 for iid in indent_to_files
+                if (PATHS.extractions / f"{safe_name(iid)}_extraction.json").exists()
+            ) - indents_run
+            print(f"\n[BATCH LIMIT] Processed {indents_run} new indent(s) this run.")
+            print(f"  Rerun to continue with remaining indents.")
+            print(f"  Tip: run without --batch to process all at once.\n")
             break
 
         safe_id = safe_name(indent_id)
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"INDENT: {indent_id}")
         print(f"Documents: {len(txt_paths)}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         # ── Skip if already processed successfully ────────────────────────────
         output_path = PATHS.extractions / f"{safe_id}_extraction.json"
@@ -102,7 +159,7 @@ def analyze_parsed_documents() -> None:
                     print(f"  [CACHED] Already processed — skipping")
                     continue
                 else:
-                    print(f"  [RERUN] Cached file is empty — reprocessing")
+                    print(f"  [RERUN] Cached file empty or outdated — reprocessing")
                     output_path.unlink()
             except Exception:
                 pass
@@ -176,7 +233,7 @@ def analyze_parsed_documents() -> None:
             total_chars_sent += indent_extraction.analyzer_metadata.get(
                 "total_input_chars", 0
             )
-            indents_run += 1   # ← increment only on successful LLM call
+            indents_run += 1   # only increment on successful LLM call
 
         except Exception as exc:
             print(f"  [ERROR] extract_indent failed: {exc}")
@@ -204,14 +261,14 @@ def analyze_parsed_documents() -> None:
                 file_stem=f"save_{safe_id}",
             )
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"pipeline_analyze complete")
-    print(f"  Indents run this batch : {indents_run}")
+    print(f"  New indents processed  : {indents_run}")
     print(f"  LLM calls made         : {total_llm_calls}")
     print(f"  Documents processed    : {total_docs}")
     print(f"  Chars sent             : {total_chars_sent:,}")
     print(f"  Approx tokens          : ~{total_chars_sent // 4:,}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":
