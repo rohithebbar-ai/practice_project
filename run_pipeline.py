@@ -134,7 +134,7 @@ def main() -> None:
         return
 
     # ── All indents processed — run Steps 3 & 4 ──────────────────────────────
-    print(f"\n All {total_indents} indents processed!")
+    print(f"\nAll {total_indents} indents processed!")
     print(f"  Running Steps 3 & 4 to generate final standard practice...")
 
     print("\n" + "=" * 60)
@@ -149,7 +149,7 @@ def main() -> None:
 
     print("\n" + "=" * 60)
     print("Pipeline complete!")
-    print(f"Standard practice: {PATHS.best_practice_standard.resolve()}")
+    print(f"Standard practice :{PATHS.best_practice_standard.resolve()}")
     print(f"All outputs: {PATHS.parsed.parent.resolve()}")
     print("=" * 60)
 
