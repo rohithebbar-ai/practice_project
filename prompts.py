@@ -1,4 +1,4 @@
-PROMPT_VERSION = "v3.2"
+PROMPT_VERSION = "v3.3"
 
 DOCUMENT_CLASSIFICATION_PROMPT_V1 = """
 You are a procurement document classifier.
@@ -52,8 +52,8 @@ Reason ACROSS all documents together to produce a unified procurement summary,
 aggregated practices, risks, approval flow, and cross-document observations.
 
 PART 3 — Category-document interrelationship analysis
-Identify how the procurement category (civil work, supply, service, canteen, etc.)
-relates to the way each document type is structured and documented.
+Identify how the procurement category relates to the way each document type
+is structured and documented.
 This is the most analytically valuable part — it reveals patterns that are
 impossible to see by reading documents one at a time.
 
@@ -69,7 +69,8 @@ IMPORTANT RULES:
 PART 1: DOCUMENT STRUCTURE ANALYSIS RULES
 ════════════════════════════════════════════════════════════
 
-For each document, in addition to content analysis, analyse its STRUCTURE:
+For each document, analyse its STRUCTURE and critically evaluate
+BOTH strengths AND weaknesses.
 
 sections_found:
 - List all identifiable sections/headings in the document in order.
@@ -92,20 +93,85 @@ structure_quality:
 
 logical_sequence:
 - Describe the flow of the document in one sentence.
-- e.g. "BOQ items listed by work zone, each zone has supply and labour rows"
-- e.g. "Safety document lists hazards alphabetically without risk ratings"
 
 missing_sections:
 - Sections you would expect for this document type that are absent.
-- BOQ missing: ["Unit of Measure", "Rate column", "Total Amount"]
-- Tech Spec missing: ["Acceptance Criteria", "Payment Milestones"]
-- Safety missing: ["Emergency Contact Numbers", "Incident Reporting Procedure"]
 
 notable_pattern:
 - One sentence on the most important structural observation.
-- Focus on what a procurement manager should know about how this doc is organised.
 
-DOCUMENT TYPE STRUCTURE EXPECTATIONS:
+════════════════════════════════════════════════════════════
+GOOD PRACTICES vs WEAK/MISSING ITEMS — CRITICAL RULES
+════════════════════════════════════════════════════════════
+
+good_practices_observed:
+- List ONLY things done WELL in this specific document.
+- Must have concrete evidence from the document.
+- Examples:
+  BOQ: "Clear unit rates provided for each line item"
+  Safety: "Hazards linked to specific PPE requirements"
+  Tech Spec: "Numbered sections with measurable acceptance criteria"
+  Tracker: "4 vendors listed with vendor codes"
+
+weak_or_missing_items — MANDATORY RULES:
+- You MUST find at least 1 weak item per document.
+- NEVER return [] unless the document is genuinely perfect in every way.
+- A document that scores "Well structured" can still have weak items.
+- Look critically — every real procurement document has gaps.
+- Be specific — do not write vague issues like "could be improved".
+
+Weak item checklist by document type — check ALL of these:
+
+BOQ weak items to look for:
+  - Rate column missing or blank
+  - Unit of measure missing or inconsistent
+  - Vague item descriptions (e.g. "Miscellaneous work" with no details)
+  - No subtotals or grand total row
+  - Items grouped poorly or no logical sequence
+  - Quantities seem unrealistic or are all "1"
+  - No revision number or date on the BOQ
+
+Technical Specification weak items to look for:
+  - No acceptance criteria or testing standards mentioned
+  - Scope is vague — does not define boundaries of work clearly
+  - No Indian/international standards referenced (IS codes, ASTM, etc.)
+  - Payment schedule missing or vague
+  - No penalty for non-conformance
+  - Deliverables not clearly listed
+  - "Shall" language missing — requirements not clearly mandatory
+
+Safety / HSE Document weak items to look for:
+  - No risk rating (High/Medium/Low) against each hazard
+  - PPE listed generically without linking to specific tasks
+  - No emergency contact numbers
+  - No incident reporting procedure
+  - Contractor obligations listed but no verification mechanism
+  - No permit-to-work reference for high-risk activities
+  - Activity-wise hazard breakdown missing
+
+Term Sheet weak items to look for:
+  - Penalty clauses missing or vague
+  - Payment milestone percentages not specified
+  - Warranty period not defined
+  - Mobilisation advance not addressed
+  - No liquidated damages clause
+
+Approval Note weak items to look for:
+  - Justification is weak or generic
+  - No evidence provided for single-source claim
+  - Approver role not clearly stated
+  - Date missing
+
+Procurement Tracker weak items to look for:
+  - Key fields are null/blank (scope, cost, dates)
+  - BOQ surplus check marked null
+  - Term sheet type not specified
+  - Vendor count is 1 with no single-party justification
+  - Job risk category blank
+
+════════════════════════════════════════════════════════════
+DOCUMENT TYPE STRUCTURE EXPECTATIONS
+════════════════════════════════════════════════════════════
 
 BOQ / Cost Estimate:
 - Expected sections: Item No, Description, Unit, Quantity, Rate, Amount.
@@ -140,47 +206,85 @@ Approval Note:
 PART 2: CROSS-DOCUMENT SYNTHESIS RULES
 ════════════════════════════════════════════════════════════
 
-procurement_type: MANDATORY — you must ALWAYS return this field.
-NEVER return null. NEVER return "Uncategorised". Always make a determination.
+procurement_type: MANDATORY — ALWAYS return this field.
+NEVER return null. NEVER return "Uncategorised". NEVER use a fixed list.
+Always infer dynamically from document content.
 
-Derive procurement_type by reading ALL documents in this priority order:
-1. "Package Description" field in the Procurement Tracker
-2. "Brief Scope of Work" field in the Procurement Tracker
-3. BOQ item descriptions — what work/materials are listed?
-4. Technical Specification title or objective section
-5. The indent title/ID as a last resort
+────────────────────────────────────────────────────────────
+HOW TO DERIVE procurement_type — READ DOCUMENTS IN THIS ORDER:
+────────────────────────────────────────────────────────────
 
-Format: "Category - Specific Work Type"
+Step 1 — Read Procurement Tracker first (highest priority):
+  - "Package Description" field → tells you what is being procured
+  - "Brief Scope of Work" field → tells you the nature of work
+  - "Type of Indent" field → Supply / Service / Supply & Service
 
-Category must be one of:
-- Civil (construction, installation, drain, road, foundation, blasting, painting)
-- Supply (materials, equipment, furniture, aggregates, consumables)
-- Supply & Service (combined supply and installation/erection)
-- NDT (non-destructive testing, GPR, soil investigation, survey)
-- Canteen (food services, catering)
-- Housekeeping (cleaning, sanitation)
-- Manpower (labour supply, staffing)
-- Electrical (electrical works, cabling, switchgear)
-- Mechanical (mechanical works, pipelines, HVAC)
-- Structural (fabrication, erection, steel works)
-- Annual Rate Contract (ongoing rate contracts — prefix ALL ARC indents with this)
-- Other (only if genuinely cannot be determined)
+Step 2 — If Tracker missing or fields null, read BOQ:
+  - What are the line items describing?
+  - Are they work activities (excavation, installation, painting)?
+    → it is a works/service contract
+  - Are they material items (steel plates, cables, pipes, furniture)?
+    → it is a supply contract
+  - Are they both materials AND installation?
+    → it is Supply & Service
 
-Specific Work Type examples:
-- Drain Installation, Road Construction, Soil Investigation, GPR Survey
-- Tree Relocation, Painting Works, Pile Foundation, Rock Excavation
-- Natural Aggregates, Water Tank, Furniture & Fixtures, Lego Blocks
-- Canteen Operation, Crew Control Room, IM Section Store
+Step 3 — If BOQ missing, read Technical Specification:
+  - What does the title or objective section say?
+  - What deliverables are described?
 
-Special rules:
-- If "ARC" or "Annual Rate Contract" or "Rate Contract" appears anywhere
-  → ALWAYS prefix with "Annual Rate Contract - " e.g. "Annual Rate Contract - Civil Works"
-- If only supply of materials with no service → "Supply - [material name]"
-- If combined supply and installation/erection → "Supply & Service - [work type]"
-- Derive the specific work type from actual document content, not just the title
-- Read BOQ line items if the title is ambiguous — they reveal the actual work
+Step 4 — Use indent title/ID only as last resort.
 
+────────────────────────────────────────────────────────────
+FORMAT: "Category - Specific Work Type"
+────────────────────────────────────────────────────────────
+
+Category derivation — ask yourself:
+  What is the PRIMARY nature of this work?
+
+  Is it physical construction or installation work on site?
+    → Use the engineering discipline as category:
+      Civil, Electrical, Mechanical, Structural, Instrumentation,
+      Piping, HVAC, Fire Fighting, Telecom, IT, or any other discipline
+      that fits the actual work described.
+
+  Is it purely supplying goods/materials with no installation?
+    → "Supply"
+
+  Is it supplying goods AND installing/erecting them?
+    → "Supply & Service"
+
+  Is it a testing, inspection, or survey service?
+    → "NDT", "Survey", "Inspection", or the specific service name
+
+  Is it a facility management or support service?
+    → Use the service name: Canteen, Housekeeping, Manpower,
+      Security, Transport, Horticulture, or whatever fits
+
+  Is it an ongoing rate contract for any of the above?
+    → ALWAYS prefix with "Annual Rate Contract - "
+      e.g. "Annual Rate Contract - Civil Works"
+           "Annual Rate Contract - Electrical Maintenance"
+           "Annual Rate Contract - Supply RMC"
+
+Specific Work Type derivation — use 2-5 words:
+  - Derive from actual content, not from the indent title alone
+  - Read BOQ line items if Package Description is vague
+  - Examples of good specific work types:
+    Precast Drain Installation, Road Construction, Pile Head Breaking,
+    GPR Survey, Soil Investigation, Tree Relocation, Epoxy Painting,
+    EOT Crane Maintenance, DSL System Erection, Weigh Bridge Calibration,
+    Canteen Operation, Manpower Supply, Mobile Locker Supply,
+    Natural Aggregates Supply, Water Tank Installation,
+    Control Room Interior Works, Lego Block Supply,
+    Facility Maintenance, Gate Electrical Works
+
+NEVER copy-paste from a fixed list — read the documents and infer.
+NEVER return null.
+NEVER return "Uncategorised" or "Other" unless truly no information exists.
+
+────────────────────────────────────────────────────────────
 Cross-document checks (flag in weak_items if found):
+────────────────────────────────────────────────────────────
 - BOQ scope does not match Technical Spec scope.
 - Vendor panel has only 1 vendor but no single-party approval exists.
 - Approval date is after order required date.
@@ -209,15 +313,17 @@ For each document type present in this indent, describe how the
 procurement category shapes the way that document is written.
 
 Ask yourself:
-- Does a civil works BOQ look different from a supply BOQ?
-  (Civil: work items with labour/material split vs Supply: product
-   lines with unit prices)
-- Does a canteen service safety document cover different hazards
-  than a construction safety document?
-  (Canteen: food safety, fire, hygiene vs Construction: fall, crush,
-   PPE, permit to work)
-- Does the scope of work in a Technical Spec for NDT testing follow
-  a different structure than one for drain installation?
+- Does a civil works BOQ look different from an electrical BOQ?
+  (Civil: work items with labour/material split, zone-wise grouping
+   Electrical: equipment items with supply/erection split, panel schedules)
+- Does a canteen safety document cover different hazards than
+  a mechanical maintenance safety document?
+  (Canteen: food hygiene, fire, FSSAI compliance
+   Mechanical: crush, pinch points, hot work, permit to work)
+- Does a Technical Spec for NDT testing differ from one for
+  civil drain installation?
+  (NDT: test methods, equipment calibration, reporting formats
+   Civil: material standards, workmanship, measurement rules)
 
 For each category_document_pattern entry:
 - procurement_type: this indent's procurement type.
