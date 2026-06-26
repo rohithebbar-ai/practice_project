@@ -1,4 +1,4 @@
-PROMPT_VERSION = "v3.1"
+PROMPT_VERSION = "v3.2"
 
 DOCUMENT_CLASSIFICATION_PROMPT_V1 = """
 You are a procurement document classifier.
@@ -140,29 +140,45 @@ Approval Note:
 PART 2: CROSS-DOCUMENT SYNTHESIS RULES
 ════════════════════════════════════════════════════════════
 
-procurement_type: MANDATORY — you must always return this field, never null.
-Derive it from the package description, scope of work, or indent title.
-Format: "Category - Specific Work" (e.g. "Civil - Drain Installation")
-or just "Category" if sub-type is unclear (e.g. "Canteen Services").
+procurement_type: MANDATORY — you must ALWAYS return this field.
+NEVER return null. NEVER return "Uncategorised". Always make a determination.
 
-Examples by document signals:
-- Indent title contains "precast drain" → "Civil - Drain Installation"
-- Indent title contains "canteen"       → "Canteen Services"
-- Indent title contains "road"          → "Civil - Road Construction"
-- Indent title contains "water tank"    → "Supply - Water Tank Installation"
-- Indent title contains "NDT"           → "NDT Testing Services"
-- Indent title contains "housekeeping"  → "Housekeeping Services"
-- Indent title contains "fabrication"   → "Structural Fabrication"
-- Indent title contains "electrical"    → "Electrical Maintenance"
-- Indent title contains "aggregate"     → "Supply - Aggregates"
-- Indent title contains "locker"        → "Supply - Furniture & Fixtures"
-- Indent title contains "blasting"      → "Civil - Rock Excavation"
-- Indent title contains "ARC" or "rate contract" → "Annual Rate Contract - [discipline]"
-- Indent title contains "infrastructure" → "Civil - Infrastructure Works"
-- Indent title contains "manpower"      → "Manpower Services"
+Derive procurement_type by reading ALL documents in this priority order:
+1. "Package Description" field in the Procurement Tracker
+2. "Brief Scope of Work" field in the Procurement Tracker
+3. BOQ item descriptions — what work/materials are listed?
+4. Technical Specification title or objective section
+5. The indent title/ID as a last resort
 
-If none of the above match, infer from the BOQ items or scope of work.
-Do NOT return null — always make a best-effort determination.
+Format: "Category - Specific Work Type"
+
+Category must be one of:
+- Civil (construction, installation, drain, road, foundation, blasting, painting)
+- Supply (materials, equipment, furniture, aggregates, consumables)
+- Supply & Service (combined supply and installation/erection)
+- NDT (non-destructive testing, GPR, soil investigation, survey)
+- Canteen (food services, catering)
+- Housekeeping (cleaning, sanitation)
+- Manpower (labour supply, staffing)
+- Electrical (electrical works, cabling, switchgear)
+- Mechanical (mechanical works, pipelines, HVAC)
+- Structural (fabrication, erection, steel works)
+- Annual Rate Contract (ongoing rate contracts — prefix ALL ARC indents with this)
+- Other (only if genuinely cannot be determined)
+
+Specific Work Type examples:
+- Drain Installation, Road Construction, Soil Investigation, GPR Survey
+- Tree Relocation, Painting Works, Pile Foundation, Rock Excavation
+- Natural Aggregates, Water Tank, Furniture & Fixtures, Lego Blocks
+- Canteen Operation, Crew Control Room, IM Section Store
+
+Special rules:
+- If "ARC" or "Annual Rate Contract" or "Rate Contract" appears anywhere
+  → ALWAYS prefix with "Annual Rate Contract - " e.g. "Annual Rate Contract - Civil Works"
+- If only supply of materials with no service → "Supply - [material name]"
+- If combined supply and installation/erection → "Supply & Service - [work type]"
+- Derive the specific work type from actual document content, not just the title
+- Read BOQ line items if the title is ambiguous — they reveal the actual work
 
 Cross-document checks (flag in weak_items if found):
 - BOQ scope does not match Technical Spec scope.
@@ -222,7 +238,7 @@ EVIDENCE RULES:
 Return this exact JSON structure:
 {
   "procurement_summary": {
-    "procurement_type": string,  // REQUIRED — never null, always infer from context
+    "procurement_type": string,  // REQUIRED — never null, never "Uncategorised"
     "package_description": string | null,
     "scope_of_work": string | null,
     "location": string | null,
