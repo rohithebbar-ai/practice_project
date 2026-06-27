@@ -26,3 +26,21 @@ for f in list(Path('pipeline_outputs/03_extractions').rglob('*_extraction.json')
     meta = data.get('analyzer_metadata', {})
     print(f'{f.name[:50]}: {meta.get(\"prompt_version\", \"NOT FOUND\")}')
 "
+
+
+
+
+
+python -c "
+from src.llm_client import LLMClient
+llm = LLMClient()
+result = llm.chat_json(
+    messages=[
+        {'role': 'system', 'content': 'Return only valid JSON: {\"test\": \"ok\"}'},
+        {'role': 'user', 'content': 'Return the JSON now'}
+    ],
+    max_tokens=100
+)
+print('SUCCESS:', result)
+"
+
