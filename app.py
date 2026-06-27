@@ -1,11 +1,12 @@
 """
-app.py — Procurement Indent Analyser  (v4)
+app.py — Procurement Indent Analyser  (v5)
 ─────────────────────────────────────────
-Features:
+Based on v3 (working) + new features:
   - Domain selector: Civil / Electromechanical
-  - Standard Practice viewer (browse what the standard says)
-  - Upload new indent and compare against selected domain standard
-  - Three upload modes: Folder, Multi-file, Single file
+  - Standard Practice viewer
+  - LLM-based comparison
+  - Pre-auth fix for WinError 233
+  - 8 tabs including Good Practices + Weak Areas
 """
 
 import streamlit as st
@@ -17,14 +18,45 @@ import os
 import sys
 from pathlib import Path
 
+# ── Fix working directory FIRST before anything else ─────────────────────────
+# This fixes WinError 233 — ensures .env loads correctly
+# before Streamlit spawns any subprocesses
+os.chdir(Path(__file__).parent)
+sys.path.insert(0, str(Path(__file__).parent))
+
+# ── Pre-load credentials in main process ─────────────────────────────────────
+# This fixes WinError 233 on Windows — credentials must be
+# refreshed in the main process before any subprocess is spawned
+from dotenv import load_dotenv
+load_dotenv()
+
+try:
+    import google.auth.transport.requests
+    import google.oauth2.service_account
+
+    _sa_file  = os.getenv("GENAI_SERVICE_ACCOUNT")
+    _auth_url = os.getenv("GENAI_AUTH_URL")
+
+    if _sa_file and _auth_url and Path(_sa_file).exists():
+        _creds = google.oauth2.service_account.IDTokenCredentials\
+            .from_service_account_file(
+                _sa_file,
+                target_audience=_auth_url
+            )
+        _request = google.auth.transport.requests.Request()
+        _creds.refresh(_request)
+        print("[AUTH] Credentials pre-loaded successfully")
+    else:
+        print(f"[AUTH WARN] Service account file not found: {_sa_file}")
+except Exception as _e:
+    print(f"[AUTH WARN] Pre-load failed (will retry on first call): {_e}")
+
 st.set_page_config(
     page_title="Procurement Indent Analyser",
     page_icon="📋",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 # ── Domain configuration ──────────────────────────────────────────────────────
 DOMAINS = {
@@ -37,7 +69,7 @@ DOMAINS = {
     "⚡ Electromechanical": {
         "key":           "electromechanical",
         "display":       "Electromechanical Indents",
-        "standard_path": "pipeline_outputs_electromechanical/05_standard/best_practice_standard.json",
+        "standard_path": "pipeline_outputs_electromechnical/05_standard/best_practice_standard.json",
         "description":   "Electrical, mechanical, instrumentation, and related indents",
     },
 }
@@ -62,20 +94,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     margin:0 0 0.4rem 0;letter-spacing:-0.02em;
 }
 .app-header p { font-size:0.9rem;opacity:0.72;margin:0; }
-
-.domain-card {
-    background: white;
-    border: 2px solid #E8EBF0;
-    border-radius: 12px;
-    padding: 1.25rem 1.5rem;
-    margin-bottom: 0.75rem;
-    cursor: pointer;
-    transition: border-color 0.15s;
-}
-.domain-card.active {
-    border-color: #3B82F6;
-    background: #EFF6FF;
-}
 
 .score-card {
     background:white;border-radius:12px;padding:1.5rem;
@@ -112,25 +130,13 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     font-size:0.9rem;font-weight:600;color:#111827;
     margin-bottom:0.3rem;
 }
-.practice-reason {
-    font-size:0.8rem;color:#6B7280;
-}
+.practice-reason { font-size:0.8rem;color:#6B7280; }
 .practice-freq {
     display:inline-block;background:#F3F4F6;
     border-radius:20px;padding:0.15rem 0.6rem;
     font-size:0.72rem;color:#374151;
     font-family:'JetBrains Mono',monospace;
     margin-top:0.4rem;
-}
-.good-item {
-    background:#F0FDF4;border-left:3px solid #22C55E;
-    padding:0.6rem 0.9rem;border-radius:0 6px 6px 0;
-    margin-bottom:0.5rem;font-size:0.875rem;color:#166534;
-}
-.weak-item {
-    background:#FFF1F2;border-left:3px solid #F43F5E;
-    padding:0.6rem 0.9rem;border-radius:0 6px 6px 0;
-    margin-bottom:0.5rem;font-size:0.875rem;color:#881337;
 }
 .rec-item {
     background:#EFF6FF;border-left:3px solid #3B82F6;
@@ -141,6 +147,16 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background:#FFF7ED;border-left:3px solid #F97316;
     padding:0.6rem 0.9rem;border-radius:0 6px 6px 0;
     margin-bottom:0.5rem;font-size:0.875rem;color:#9A3412;
+}
+.good-item {
+    background:#F0FDF4;border-left:3px solid #22C55E;
+    padding:0.6rem 0.9rem;border-radius:0 6px 6px 0;
+    margin-bottom:0.5rem;font-size:0.875rem;color:#166534;
+}
+.weak-item {
+    background:#FFF1F2;border-left:3px solid #F43F5E;
+    padding:0.6rem 0.9rem;border-radius:0 6px 6px 0;
+    margin-bottom:0.5rem;font-size:0.875rem;color:#881337;
 }
 .file-chip {
     display:inline-block;background:#F3F4F6;border-radius:20px;
@@ -154,6 +170,167 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ── Folder upload component ───────────────────────────────────────────────────
+def folder_upload_component(key: str = "folder_upload"):
+    component_html = """
+    <style>
+    * { box-sizing:border-box;font-family:'Inter','Segoe UI',sans-serif; }
+    .folder-zone {
+        border:2px dashed #D1D5DB;border-radius:12px;
+        padding:2rem;text-align:center;background:white;
+        cursor:pointer;transition:all 0.2s;
+    }
+    .folder-zone:hover,.folder-zone.dragover {
+        border-color:#3B82F6;background:#EFF6FF;
+    }
+    .folder-icon { font-size:2rem;margin-bottom:0.5rem; }
+    .folder-title {font-size:0.95rem;font-weight:600;color:#111827;}
+    .folder-sub   {font-size:0.78rem;color:#6B7280;}
+    .folder-btn {
+        display:inline-block;margin-top:0.75rem;
+        padding:0.4rem 1rem;background:#1B2A4A;color:white;
+        border-radius:8px;font-size:0.85rem;cursor:pointer;
+    }
+    .folder-btn:hover { background:#2D4A7A; }
+    .file-list {
+        margin-top:0.75rem;text-align:left;
+        max-height:150px;overflow-y:auto;
+    }
+    .file-row {
+        display:flex;align-items:center;gap:0.5rem;
+        padding:0.3rem 0.4rem;border-radius:6px;
+        font-size:0.78rem;color:#374151;
+    }
+    .file-row:hover { background:#F3F4F6; }
+    .file-ext {
+        font-size:0.68rem;background:#E5E7EB;
+        padding:0.1rem 0.35rem;border-radius:4px;
+        font-family:monospace;color:#4B5563;
+        min-width:34px;text-align:center;
+    }
+    .progress-bar {
+        height:3px;background:#E5E7EB;border-radius:2px;
+        margin-top:0.75rem;overflow:hidden;display:none;
+    }
+    .progress-fill {
+        height:100%;
+        background:linear-gradient(90deg,#3B82F6,#1D4ED8);
+        transition:width 0.3s;width:0%;
+    }
+    .status-msg {
+        font-size:0.78rem;color:#6B7280;
+        margin-top:0.4rem;display:none;
+    }
+    </style>
+
+    <input type="file" id="folderInput" webkitdirectory directory multiple
+           accept=".pdf,.docx,.xlsx,.xls,.xlsm,.txt"
+           style="display:none;">
+
+    <div class="folder-zone" id="dropZone"
+         onclick="document.getElementById('folderInput').click()">
+        <div class="folder-icon">📁</div>
+        <div class="folder-title">Click to select indent folder</div>
+        <div class="folder-sub">Chrome / Edge only</div>
+        <div class="folder-btn"
+             onclick="event.stopPropagation();
+                      document.getElementById('folderInput').click()">
+            Browse Folder
+        </div>
+        <div class="progress-bar" id="progressBar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div class="status-msg" id="statusMsg"></div>
+        <div class="file-list"  id="fileList"></div>
+    </div>
+
+    <script>
+    const ALLOWED=['pdf','docx','xlsx','xls','xlsm','txt'];
+    function getExt(n){return n.split('.').pop().toLowerCase();}
+    function fmtSize(b){
+        if(b<1024)return b+' B';
+        if(b<1048576)return (b/1024).toFixed(1)+' KB';
+        return (b/1048576).toFixed(1)+' MB';
+    }
+    async function processFiles(files){
+        const filtered=Array.from(files).filter(
+            f=>ALLOWED.includes(getExt(f.name))
+        );
+        if(!filtered.length){
+            document.getElementById('statusMsg').style.display='block';
+            document.getElementById('statusMsg').textContent=
+                'No supported files found.';
+            return;
+        }
+        const bar=document.getElementById('progressBar');
+        const fill=document.getElementById('progressFill');
+        const msg=document.getElementById('statusMsg');
+        const list=document.getElementById('fileList');
+        bar.style.display='block';msg.style.display='block';
+        list.innerHTML='';
+        const results=[];
+        for(let i=0;i<filtered.length;i++){
+            const file=filtered[i];
+            msg.textContent=
+                `Reading ${file.name}... (${i+1}/${filtered.length})`;
+            fill.style.width=((i+1)/filtered.length*100)+'%';
+            const b64=await new Promise(resolve=>{
+                const r=new FileReader();
+                r.onload=e=>{
+                    const a=new Uint8Array(e.target.result);
+                    let s='';
+                    for(let j=0;j<a.byteLength;j++)
+                        s+=String.fromCharCode(a[j]);
+                    resolve(btoa(s));
+                };
+                r.readAsArrayBuffer(file);
+            });
+            results.push({
+                name:file.name,content_b64:b64,
+                size:file.size,ext:getExt(file.name)
+            });
+            const ext=getExt(file.name).toUpperCase();
+            list.innerHTML+=`
+                <div class="file-row">
+                    <span class="file-ext">${ext}</span>
+                    <span>${file.name}</span>
+                    <span style="margin-left:auto;color:#9CA3AF;
+                                 font-size:0.7rem;">
+                        ${fmtSize(file.size)}
+                    </span>
+                </div>`;
+        }
+        msg.textContent=`✓ ${filtered.length} file(s) ready`;
+        window.parent.postMessage(
+            {type:'streamlit:setComponentValue',value:results},'*'
+        );
+    }
+    document.getElementById('folderInput').addEventListener(
+        'change',e=>processFiles(e.target.files)
+    );
+    const zone=document.getElementById('dropZone');
+    zone.addEventListener('dragover',e=>{
+        e.preventDefault();zone.classList.add('dragover');
+    });
+    zone.addEventListener('dragleave',
+        ()=>zone.classList.remove('dragover')
+    );
+    zone.addEventListener('drop',e=>{
+        e.preventDefault();zone.classList.remove('dragover');
+        const files=[];
+        if(e.dataTransfer.items){
+            for(let i of e.dataTransfer.items)
+                if(i.kind==='file')files.push(i.getAsFile());
+        }else{
+            for(let f of e.dataTransfer.files)files.push(f);
+        }
+        processFiles(files);
+    });
+    </script>
+    """
+    return components.html(component_html, height=320, scrolling=False)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -221,10 +398,9 @@ def render_findings(findings):
         </div>""", unsafe_allow_html=True)
 
 
-def render_practice_list(items: list, key_field: str = "practice",
-                          reason_field: str = "reason",
-                          freq_field: str = "source_frequency"):
-    """Render a list of practices as cards."""
+def render_practice_list(items, key_field="practice",
+                          reason_field="reason",
+                          freq_field="source_frequency"):
     if not items:
         st.markdown(
             '<p style="color:#9CA3AF;font-size:0.85rem;">'
@@ -242,12 +418,13 @@ def render_practice_list(items: list, key_field: str = "practice",
         <div class="practice-card">
             <div class="practice-title">{title}</div>
             <div class="practice-reason">{reason}</div>
-            <span class="practice-freq">Seen in {freq} indent(s)</span>
+            <span class="practice-freq">
+                Seen in {freq} indent(s)
+            </span>
         </div>""", unsafe_allow_html=True)
 
 
-def render_weak_practice_list(items: list):
-    """Render common weak practices with fix."""
+def render_weak_practice_list(items):
     if not items:
         st.markdown(
             '<p style="color:#9CA3AF;font-size:0.85rem;">'
@@ -264,7 +441,8 @@ def render_weak_practice_list(items: list):
         freq   = item.get("source_frequency", 0)
         types  = ", ".join(item.get("procurement_types", []))
         st.markdown(f"""
-        <div class="practice-card" style="border-left:3px solid #F43F5E;">
+        <div class="practice-card"
+             style="border-left:3px solid #F43F5E;">
             <div class="practice-title" style="color:#881337;">
                 ⚠ {issue}
             </div>
@@ -274,12 +452,13 @@ def render_weak_practice_list(items: list):
              f'<b>Fix:</b> {fix}</div>' if fix else ''}
             {f'<div class="practice-reason"><b>Types:</b> {types}</div>'
              if types else ''}
-            <span class="practice-freq">Seen in {freq} indent(s)</span>
+            <span class="practice-freq">
+                Seen in {freq} indent(s)
+            </span>
         </div>""", unsafe_allow_html=True)
 
 
-def render_category_patterns(items: list):
-    """Render category-specific patterns."""
+def render_category_patterns(items):
     if not items:
         st.markdown(
             '<p style="color:#9CA3AF;font-size:0.85rem;">'
@@ -287,15 +466,12 @@ def render_category_patterns(items: list):
             unsafe_allow_html=True
         )
         return
-    # Group by procurement_type
     grouped: dict = {}
     for item in items:
         if not isinstance(item, dict):
             continue
         pt = item.get("procurement_type", "Other")
-        if pt not in grouped:
-            grouped[pt] = []
-        grouped[pt].append(item)
+        grouped.setdefault(pt, []).append(item)
 
     for pt, patterns in grouped.items():
         st.markdown(
@@ -308,178 +484,17 @@ def render_category_patterns(items: list):
             rec      = p.get("recommendation", "")
             st.markdown(f"""
             <div class="practice-card">
-                <div class="practice-title">
-                    📄 {doc_type}
-                </div>
+                <div class="practice-title">📄 {doc_type}</div>
                 <div class="practice-reason">{pattern}</div>
                 {f'<div class="practice-reason" style="color:#1E40AF;">'
                  f'→ {rec}</div>' if rec else ''}
             </div>""", unsafe_allow_html=True)
 
 
-# ── Folder upload component ───────────────────────────────────────────────────
-def folder_upload_component(key: str = "folder_upload"):
-    component_html = """
-    <style>
-    * { box-sizing:border-box;font-family:'Inter','Segoe UI',sans-serif; }
-    .folder-zone {
-        border:2px dashed #D1D5DB;border-radius:12px;
-        padding:2rem;text-align:center;background:white;
-        cursor:pointer;transition:all 0.2s;
-    }
-    .folder-zone:hover,.folder-zone.dragover {
-        border-color:#3B82F6;background:#EFF6FF;
-    }
-    .folder-icon { font-size:2rem;margin-bottom:0.5rem; }
-    .folder-title { font-size:0.95rem;font-weight:600;color:#111827; }
-    .folder-sub   { font-size:0.78rem;color:#6B7280; }
-    .folder-btn {
-        display:inline-block;margin-top:0.75rem;
-        padding:0.4rem 1rem;background:#1B2A4A;color:white;
-        border-radius:8px;font-size:0.85rem;cursor:pointer;
-    }
-    .folder-btn:hover { background:#2D4A7A; }
-    .file-list {
-        margin-top:0.75rem;text-align:left;
-        max-height:150px;overflow-y:auto;
-    }
-    .file-row {
-        display:flex;align-items:center;gap:0.5rem;
-        padding:0.3rem 0.4rem;border-radius:6px;
-        font-size:0.78rem;color:#374151;
-    }
-    .file-row:hover { background:#F3F4F6; }
-    .file-ext {
-        font-size:0.68rem;background:#E5E7EB;
-        padding:0.1rem 0.35rem;border-radius:4px;
-        font-family:monospace;color:#4B5563;
-        min-width:34px;text-align:center;
-    }
-    .progress-bar {
-        height:3px;background:#E5E7EB;border-radius:2px;
-        margin-top:0.75rem;overflow:hidden;display:none;
-    }
-    .progress-fill {
-        height:100%;
-        background:linear-gradient(90deg,#3B82F6,#1D4ED8);
-        transition:width 0.3s;width:0%;
-    }
-    .status-msg {
-        font-size:0.78rem;color:#6B7280;
-        margin-top:0.4rem;display:none;
-    }
-    </style>
-
-    <input type="file" id="folderInput" webkitdirectory directory multiple
-           accept=".pdf,.docx,.xlsx,.xls,.xlsm,.txt"
-           style="display:none;">
-
-    <div class="folder-zone" id="dropZone"
-         onclick="document.getElementById('folderInput').click()">
-        <div class="folder-icon">📁</div>
-        <div class="folder-title">Click to select indent folder</div>
-        <div class="folder-sub">Chrome / Edge only</div>
-        <div class="folder-btn"
-             onclick="event.stopPropagation();
-                      document.getElementById('folderInput').click()">
-            Browse Folder
-        </div>
-        <div class="progress-bar" id="progressBar">
-            <div class="progress-fill" id="progressFill"></div>
-        </div>
-        <div class="status-msg" id="statusMsg"></div>
-        <div class="file-list" id="fileList"></div>
-    </div>
-
-    <script>
-    const ALLOWED=['pdf','docx','xlsx','xls','xlsm','txt'];
-    function getExt(n){return n.split('.').pop().toLowerCase();}
-    function fmtSize(b){
-        if(b<1024)return b+' B';
-        if(b<1048576)return (b/1024).toFixed(1)+' KB';
-        return (b/1048576).toFixed(1)+' MB';
-    }
-    async function processFiles(files){
-        const filtered=Array.from(files).filter(
-            f=>ALLOWED.includes(getExt(f.name))
-        );
-        if(!filtered.length){
-            document.getElementById('statusMsg').style.display='block';
-            document.getElementById('statusMsg').textContent=
-                'No supported files found.';
-            return;
-        }
-        const bar=document.getElementById('progressBar');
-        const fill=document.getElementById('progressFill');
-        const msg=document.getElementById('statusMsg');
-        const list=document.getElementById('fileList');
-        bar.style.display='block';msg.style.display='block';
-        list.innerHTML='';
-        const results=[];
-        for(let i=0;i<filtered.length;i++){
-            const file=filtered[i];
-            msg.textContent=`Reading ${file.name}... (${i+1}/${filtered.length})`;
-            fill.style.width=((i+1)/filtered.length*100)+'%';
-            const b64=await new Promise(resolve=>{
-                const r=new FileReader();
-                r.onload=e=>{
-                    const a=new Uint8Array(e.target.result);
-                    let s='';
-                    for(let j=0;j<a.byteLength;j++)
-                        s+=String.fromCharCode(a[j]);
-                    resolve(btoa(s));
-                };
-                r.readAsArrayBuffer(file);
-            });
-            results.push({
-                name:file.name,content_b64:b64,
-                size:file.size,ext:getExt(file.name)
-            });
-            const ext=getExt(file.name).toUpperCase();
-            list.innerHTML+=`
-                <div class="file-row">
-                    <span class="file-ext">${ext}</span>
-                    <span>${file.name}</span>
-                    <span style="margin-left:auto;color:#9CA3AF;
-                                 font-size:0.7rem;">
-                        ${fmtSize(file.size)}
-                    </span>
-                </div>`;
-        }
-        msg.textContent=`✓ ${filtered.length} file(s) ready`;
-        window.parent.postMessage(
-            {type:'streamlit:setComponentValue',value:results},'*'
-        );
-    }
-    document.getElementById('folderInput').addEventListener(
-        'change',e=>processFiles(e.target.files)
-    );
-    const zone=document.getElementById('dropZone');
-    zone.addEventListener('dragover',e=>{
-        e.preventDefault();zone.classList.add('dragover');
-    });
-    zone.addEventListener('dragleave',
-        ()=>zone.classList.remove('dragover')
-    );
-    zone.addEventListener('drop',e=>{
-        e.preventDefault();zone.classList.remove('dragover');
-        const files=[];
-        if(e.dataTransfer.items){
-            for(let i of e.dataTransfer.items)
-                if(i.kind==='file')files.push(i.getAsFile());
-        }else{
-            for(let f of e.dataTransfer.files)files.push(f);
-        }
-        processFiles(files);
-    });
-    </script>
-    """
-    return components.html(component_html, height=320, scrolling=False)
-
-
 def run_pipeline(file_items, indent_name):
-    from src.document_parser import parse_file
-    from src.text_cleaner import clean_document_text
+    """Parse, clean, classify and extract from uploaded files."""
+    from src.document_parser   import parse_file
+    from src.text_cleaner      import clean_document_text
     from src.document_analyzer import DocumentAnalyzer
 
     analyzer  = DocumentAnalyzer()
@@ -510,10 +525,14 @@ def run_pipeline(file_items, indent_name):
             try:
                 text, metadata = parse_file(tmp_path)
                 cleaned        = clean_document_text(text)
+
                 if len(cleaned.strip()) < 50:
-                    st.warning(f"⚠️ {fname} — too short, skipping.")
+                    st.warning(
+                        f"⚠️ {fname} — too short after cleaning, skipping."
+                    )
                     progress.progress((i + 1) / total)
                     continue
+
                 classification = analyzer.classify_rule_based(
                     document_name=fname,
                     document_text=cleaned,
@@ -541,16 +560,29 @@ def run_pipeline(file_items, indent_name):
         '🤖 Extracting indent data (1 LLM call)...</p>',
         unsafe_allow_html=True
     )
-    try:
-        extraction = analyzer.extract_indent(
-            indent_id=indent_name.replace(" ", "_"),
-            indent_title=indent_name,
-            documents=documents,
-        )
-        result = extraction.model_dump()
-    except Exception as e:
-        st.error(f"LLM extraction failed: {e}")
-        result = {}
+
+    result = {}
+    for attempt in range(3):
+        try:
+            extraction = analyzer.extract_indent(
+                indent_id=indent_name.replace(" ", "_"),
+                indent_title=indent_name,
+                documents=documents,
+            )
+            result = extraction.model_dump()
+            break
+        except Exception as e:
+            if attempt < 2:
+                spinner_msg.markdown(
+                    f'<p style="font-size:0.875rem;color:#D97706;">'
+                    f'⚠️ Attempt {attempt+1} failed — retrying... </p>',
+                    unsafe_allow_html=True
+                )
+                import time
+                time.sleep(2)
+            else:
+                st.error(f"LLM extraction failed after 3 attempts: {e}")
+                result = {}
 
     spinner_msg.empty()
     return result
@@ -564,7 +596,6 @@ with st.sidebar:
     st.markdown("## ⚙️ Settings")
     st.markdown("---")
 
-    # Domain selector
     st.markdown("### 📂 Procurement Domain")
     selected_domain_key = st.radio(
         "Select domain",
@@ -581,14 +612,10 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Page selector
     st.markdown("### 🗂 Navigation")
     page = st.radio(
         "Go to",
-        options=[
-            "📊 Standard Practice",
-            "🔍 Analyse New Indent",
-        ],
+        options=["📊 Standard Practice", "🔍 Analyse New Indent"],
         label_visibility="collapsed",
     )
 
@@ -596,18 +623,15 @@ with st.sidebar:
     st.markdown(
         '<p style="font-size:0.72rem;color:#9CA3AF;">'
         'Procurement Intelligence System<br>'
-        'Tata Steel — Civil & EM Indents</p>',
+        'Tata Steel — Civil &amp; EM Indents</p>',
         unsafe_allow_html=True
     )
 
 
-# ── Load standard for selected domain ────────────────────────────────────────
-standard = load_standard_practice(domain_config["standard_practice_file"])
+# ── Load standard ─────────────────────────────────────────────────────────────
+standard = load_standard_practice(domain_config["standard_path"])
 
-# ══════════════════════════════════════════════════════════════════════════════
-# HEADER
-# ══════════════════════════════════════════════════════════════════════════════
-
+# ── Header ────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div class="app-header">
     <h1>📋 Procurement Indent Analyser</h1>
@@ -617,15 +641,15 @@ st.markdown(f"""
 
 if not standard:
     st.warning(
-        f"⚠️ Standard practice not found for "
+        f"⚠️ Standard practice not yet generated for "
         f"**{domain_config['display']}**.\n\n"
-        f"Expected at: `{domain_config['standard_practice_file']}`\n\n"
-        f"Run the pipeline first to generate the standard."
+        f"Expected at: `{domain_config['standard_path']}`\n\n"
+        f"Run `python run_steps34.py` to generate it."
     )
     if page == "🔍 Analyse New Indent":
         st.stop()
 
-# ── Stats bar (shown on both pages) ──────────────────────────────────────────
+# ── Stats bar ─────────────────────────────────────────────────────────────────
 if standard:
     meta = standard.get("_metadata", {})
     c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -659,6 +683,7 @@ if standard:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if page == "📊 Standard Practice":
+
     st.markdown(
         f"## 📊 Standard Practice — {domain_config['display']}"
     )
@@ -667,7 +692,6 @@ if page == "📊 Standard Practice":
         st.info("Run the pipeline to generate the standard practice.")
         st.stop()
 
-    # Standard tabs
     (stab1, stab2, stab3, stab4,
      stab5, stab6, stab7, stab8) = st.tabs([
         f"✅ Mandatory ({len(standard.get('mandatory_practices', []))})",
@@ -681,21 +705,15 @@ if page == "📊 Standard Practice":
     ])
 
     with stab1:
-        st.markdown(
-            "**Practices that MUST be present in every indent.**"
-        )
+        st.markdown("**Must be present in every indent.**")
         render_practice_list(standard.get("mandatory_practices", []))
 
     with stab2:
-        st.markdown(
-            "**Practices that improve quality — should be present.**"
-        )
+        st.markdown("**Improve quality — should be present.**")
         render_practice_list(standard.get("recommended_practices", []))
 
     with stab3:
-        st.markdown(
-            "**What good indents consistently do well.**"
-        )
+        st.markdown("**What good indents consistently do well.**")
         render_practice_list(
             standard.get("common_good_practices", []),
             key_field="practice",
@@ -703,17 +721,12 @@ if page == "📊 Standard Practice":
         )
 
     with stab4:
-        st.markdown(
-            "**Most frequent weaknesses observed — with fixes.**"
-        )
-        render_weak_practice_list(
-            standard.get("common_weak_practices", [])
-        )
+        st.markdown("**Most frequent weaknesses — with fixes.**")
+        render_weak_practice_list(standard.get("common_weak_practices", []))
 
     with stab5:
         st.markdown("**Risk areas and their controls.**")
-        items = standard.get("risk_controls", [])
-        for item in items:
+        for item in standard.get("risk_controls", []):
             if not isinstance(item, dict):
                 continue
             area    = item.get("risk_area", "")
@@ -732,25 +745,22 @@ if page == "📊 Standard Practice":
             </div>""", unsafe_allow_html=True)
 
     with stab6:
-        st.markdown("**Document types required in every indent.**")
+        st.markdown("**Required document types.**")
         render_practice_list(
             standard.get("documentation_requirements", []),
             key_field="requirement",
         )
 
     with stab7:
-        st.markdown(
-            "**How each document type should be structured.**"
-        )
-        items = standard.get("document_structure_standards", [])
-        for item in items:
+        st.markdown("**How each document should be structured.**")
+        for item in standard.get("document_structure_standards", []):
             if not isinstance(item, dict):
                 continue
-            doc_type  = item.get("document_type", "")
-            category  = item.get("procurement_category", "")
-            sections  = item.get("recommended_sections", [])
-            guidance  = item.get("structure_guidance", "")
-            freq      = item.get("source_frequency", 0)
+            doc_type = item.get("document_type", "")
+            category = item.get("procurement_category", "")
+            sections = item.get("recommended_sections", [])
+            guidance = item.get("structure_guidance", "")
+            freq     = item.get("source_frequency", 0)
             st.markdown(f"""
             <div class="practice-card">
                 <div class="practice-title">
@@ -760,8 +770,8 @@ if page == "📊 Standard Practice":
                 </div>
                 {f'<div class="practice-reason">{guidance}</div>'
                  if guidance else ''}
-                {f'<div class="practice-reason"><b>Sections:</b> '
-                 f'{", ".join(sections)}</div>'
+                {f'<div class="practice-reason">'
+                 f'<b>Sections:</b> {", ".join(sections)}</div>'
                  if sections else ''}
                 <span class="practice-freq">
                     Seen in {freq} indent(s)
@@ -776,7 +786,6 @@ if page == "📊 Standard Practice":
             standard.get("category_specific_patterns", [])
         )
 
-    # Download standard
     st.markdown("<br>", unsafe_allow_html=True)
     st.download_button(
         f"⬇️ Download {domain_config['display']} Standard (JSON)",
@@ -791,12 +800,13 @@ if page == "📊 Standard Practice":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "🔍 Analyse New Indent":
+
     st.markdown(
         f"## 🔍 Analyse New Indent — {domain_config['display']}"
     )
 
-    # Upload mode
     st.markdown("### Upload Indent Documents")
+
     mode = st.radio(
         "Upload method",
         options=[
@@ -817,7 +827,6 @@ elif page == "🔍 Analyse New Indent":
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # File collection
     file_items  = []
     files_ready = False
 
@@ -825,13 +834,13 @@ elif page == "🔍 Analyse New Indent":
         st.markdown("""
         <div style="background:#FFFBEB;border:1px solid #FDE68A;
                     border-radius:8px;padding:0.6rem 1rem;
-                    font-size:0.8rem;color:#92400E;
-                    margin-bottom:1rem;">
+                    font-size:0.8rem;color:#92400E;margin-bottom:1rem;">
             💡 <b>Chrome / Edge only.</b>
-            If button is greyed out after loading,
-            switch to Multi-File Upload.
+            If Analyse button stays greyed out after selecting files,
+            use <b>Multi-File Upload</b> instead.
         </div>
         """, unsafe_allow_html=True)
+
         folder_data = folder_upload_component(key="folder_uploader")
         if (folder_data and isinstance(folder_data, list)
                 and len(folder_data) > 0):
@@ -849,9 +858,9 @@ elif page == "🔍 Analyse New Indent":
 
     elif mode == "📄 Multi-File Upload":
         st.markdown("""
-        <div style="font-size:0.82rem;color:#6B7280;
-                    margin-bottom:0.5rem;">
-            Open indent folder → <b>Ctrl+A</b> → drag into uploader.
+        <div style="font-size:0.82rem;color:#6B7280;margin-bottom:0.5rem;">
+            Open indent folder → <b>Ctrl+A</b> to select all
+            → drag into uploader below.
         </div>
         """, unsafe_allow_html=True)
         uploaded = st.file_uploader(
@@ -885,7 +894,6 @@ elif page == "🔍 Analyse New Indent":
             files_ready = True
             st.caption(f"📄 {single.name}")
 
-    # Analyse button
     st.markdown("<br>", unsafe_allow_html=True)
     analyse_btn = st.button(
         "🔍  Analyse Indent",
@@ -895,13 +903,14 @@ elif page == "🔍 Analyse New Indent":
 
     st.markdown("---")
 
-    # Run pipeline
     if analyse_btn and files_ready:
         with st.spinner(""):
             extraction = run_pipeline(file_items, indent_name)
 
         if not extraction:
-            st.error("Extraction failed. Check documents and retry.")
+            st.error(
+                "Extraction failed. Check your documents and retry."
+            )
             st.stop()
 
         from src.indent_comparator import compare_indent_to_standard
@@ -919,7 +928,6 @@ elif page == "🔍 Analyse New Indent":
         st.session_state["report"]     = report
         st.session_state["extraction"] = extraction
 
-    # Display report
     if "report" in st.session_state:
         report     = st.session_state["report"]
         extraction = st.session_state["extraction"]
@@ -928,7 +936,6 @@ elif page == "🔍 Analyse New Indent":
             f"## Analysis: {report.indent_id.replace('_', ' ')}"
         )
 
-        # Score row
         c_score, c_type, c_recs, c_gaps = st.columns([1, 2, 2, 2])
         with c_score:
             st.markdown(f"""
@@ -973,7 +980,6 @@ elif page == "🔍 Analyse New Indent":
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Strengths
         if report.strengths:
             st.markdown("### ⭐ Strengths")
             for s in report.strengths:
@@ -983,7 +989,6 @@ elif page == "🔍 Analyse New Indent":
                 )
             st.markdown("<br>", unsafe_allow_html=True)
 
-        # Recommendations
         if report.recommendations:
             st.markdown("### 🎯 Recommendations")
             for rec in report.recommendations:
@@ -993,7 +998,6 @@ elif page == "🔍 Analyse New Indent":
                 )
             st.markdown("<br>", unsafe_allow_html=True)
 
-        # Cross-doc issues
         if report.cross_doc_issues:
             st.markdown("### ⚠️ Cross-Document Issues")
             for issue in report.cross_doc_issues:
@@ -1003,7 +1007,6 @@ elif page == "🔍 Analyse New Indent":
                 )
             st.markdown("<br>", unsafe_allow_html=True)
 
-        # Detailed findings tabs
         st.markdown("### Detailed Findings")
         (tab1, tab2, tab3, tab4,
          tab5, tab6, tab7, tab8) = st.tabs([
@@ -1025,65 +1028,42 @@ elif page == "🔍 Analyse New Indent":
         with tab7: render_findings(report.good_practice_findings)
         with tab8: render_findings(report.weak_practice_findings)
 
-        # Procurement summary expander
         st.markdown("<br>", unsafe_allow_html=True)
         with st.expander("📊 Extracted Procurement Summary",
                          expanded=False):
             ps = extraction.get("procurement_summary", {}) or {}
             fields = [
-                ("Package Description",
-                 ps.get("package_description")),
-                ("Scope of Work",
-                 ps.get("scope_of_work")),
-                ("Procurement Type",
-                 ps.get("procurement_type")),
-                ("Location",
-                 ps.get("location")),
-                ("Discipline",
-                 ps.get("discipline")),
-                ("Estimated Cost (Cr)",
-                 ps.get("estimated_cost_crores")),
-                ("Contract Period (months)",
-                 ps.get("contract_period_months")),
-                ("Order Required Date",
-                 ps.get("order_required_date")),
-                ("Job Risk Category",
-                 ps.get("job_risk_category")),
-                ("Is Single Party",
-                 ps.get("is_single_party")),
-                ("Vendor Panel",
-                 ps.get("vendor_panel")),
-                ("Vendor Count",
-                 ps.get("vendor_count")),
-                ("Term Sheet Type",
-                 ps.get("term_sheet_type")),
-                ("Technical Spec Attached",
-                 ps.get("technical_spec_attached")),
-                ("HSE Plan Available",
-                 ps.get("hse_plan_available")),
-                ("BOQ Surplus Checked",
-                 ps.get("boq_surplus_checked")),
-                ("Approval Authority",
-                 ps.get("approval_authority")),
-                ("Approval Date",
-                 ps.get("indent_approval_date")),
-                ("Procurement Head",
-                 ps.get("procurement_head")),
+                ("Package Description",      ps.get("package_description")),
+                ("Scope of Work",            ps.get("scope_of_work")),
+                ("Procurement Type",         ps.get("procurement_type")),
+                ("Location",                 ps.get("location")),
+                ("Discipline",               ps.get("discipline")),
+                ("Estimated Cost (Cr)",      ps.get("estimated_cost_crores")),
+                ("Contract Period (months)", ps.get("contract_period_months")),
+                ("Order Required Date",      ps.get("order_required_date")),
+                ("Job Risk Category",        ps.get("job_risk_category")),
+                ("Is Single Party",          ps.get("is_single_party")),
+                ("Vendor Panel",             ps.get("vendor_panel")),
+                ("Vendor Count",             ps.get("vendor_count")),
+                ("Term Sheet Type",          ps.get("term_sheet_type")),
+                ("Technical Spec Attached",  ps.get("technical_spec_attached")),
+                ("HSE Plan Available",       ps.get("hse_plan_available")),
+                ("BOQ Surplus Checked",      ps.get("boq_surplus_checked")),
+                ("Approval Authority",       ps.get("approval_authority")),
+                ("Approval Date",            ps.get("indent_approval_date")),
+                ("Procurement Head",         ps.get("procurement_head")),
             ]
             ca, cb = st.columns(2)
             for i, (label, value) in enumerate(fields):
                 col = ca if i % 2 == 0 else cb
                 with col:
                     display = (
-                        value if value and
-                        str(value).lower() not in
-                        ("null", "none", "")
+                        value
+                        if value and str(value).lower()
+                        not in ("null", "none", "")
                         else "—"
                     )
-                    color = (
-                        "#111827" if display != "—"
-                        else "#D1D5DB"
-                    )
+                    color = "#111827" if display != "—" else "#D1D5DB"
                     st.markdown(f"""
                     <div style="padding:0.4rem 0;
                                 border-bottom:1px solid #F3F4F6;">
@@ -1096,7 +1076,6 @@ elif page == "🔍 Analyse New Indent":
                             {display}</span>
                     </div>""", unsafe_allow_html=True)
 
-        # Downloads
         st.markdown("<br>", unsafe_allow_html=True)
         dl1, dl2 = st.columns(2)
         with dl1:
@@ -1128,7 +1107,7 @@ elif page == "🔍 Analyse New Indent":
         <div style="text-align:center;padding:3rem;color:#9CA3AF;">
             <div style="font-size:3rem;margin-bottom:1rem;">📂</div>
             <div style="font-size:1rem;font-weight:500;color:#6B7280;">
-                Select upload method, add files, click Analyse
+                Select upload method, add files, then click Analyse
             </div>
             <div style="font-size:0.85rem;margin-top:0.5rem;">
                 Supports BOQ, Procurement Tracker, Technical Spec,
