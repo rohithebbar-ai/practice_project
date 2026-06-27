@@ -18,38 +18,13 @@ import os
 import sys
 from pathlib import Path
 
-# ── Fix working directory FIRST before anything else ─────────────────────────
-# This fixes WinError 233 — ensures .env loads correctly
-# before Streamlit spawns any subprocesses
+# ── Fix working directory ─────────────────────────────────────────────────────
 os.chdir(Path(__file__).parent)
 sys.path.insert(0, str(Path(__file__).parent))
 
-# ── Pre-load credentials in main process ─────────────────────────────────────
-# This fixes WinError 233 on Windows — credentials must be
-# refreshed in the main process before any subprocess is spawned
+# ── Load environment variables ────────────────────────────────────────────────
 from dotenv import load_dotenv
 load_dotenv()
-
-try:
-    import google.auth.transport.requests
-    import google.oauth2.service_account
-
-    _sa_file  = os.getenv("GENAI_SERVICE_ACCOUNT")
-    _auth_url = os.getenv("GENAI_AUTH_URL")
-
-    if _sa_file and _auth_url and Path(_sa_file).exists():
-        _creds = google.oauth2.service_account.IDTokenCredentials\
-            .from_service_account_file(
-                _sa_file,
-                target_audience=_auth_url
-            )
-        _request = google.auth.transport.requests.Request()
-        _creds.refresh(_request)
-        print("[AUTH] Credentials pre-loaded successfully")
-    else:
-        print(f"[AUTH WARN] Service account file not found: {_sa_file}")
-except Exception as _e:
-    print(f"[AUTH WARN] Pre-load failed (will retry on first call): {_e}")
 
 st.set_page_config(
     page_title="Procurement Indent Analyser",
