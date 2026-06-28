@@ -549,6 +549,44 @@ if page == "📊 Standard Practice":
         mime="application/json",
     )
 
+    # ── Standard Practice Narrative ───────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("## 🧠 Insights: What This Standard Tells Us")
+    st.markdown(
+        "*A natural language summary of what was learned from all "
+        "historical indents — patterns, interrelationships, and key insights.*"
+    )
+
+    insight_key = f"standard_insight_{domain['key']}"
+
+    if insight_key not in st.session_state:
+        if st.button(
+            "🔍 Generate Insights (1 LLM call)",
+            key=f"gen_insight_{domain['key']}",
+        ):
+            with st.spinner("Generating insights (10-15 seconds)..."):
+                from src.insight_generator import generate_standard_insight
+                insight = generate_standard_insight(standard)
+                st.session_state[insight_key] = insight
+            st.rerun()
+    else:
+        insight = st.session_state[insight_key]
+        st.markdown(
+            f'<div style="background:white;border-radius:12px;'
+            f'padding:2rem;border:1px solid #E8EBF0;'
+            f'line-height:1.8;font-size:0.95rem;color:#1F2937;">'
+            f'{insight.replace(chr(10), "<br>")}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button(
+            "🔄 Regenerate",
+            key=f"regen_insight_{domain['key']}",
+        ):
+            del st.session_state[insight_key]
+            st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 2 — ANALYSE NEW INDENT
@@ -877,6 +915,69 @@ elif page == "🔍 Analyse New Indent":
                 file_name=f"{report.indent_id}_report.json",
                 mime="application/json",
             )
+
+        # ── Deep Indent Insight ───────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("## 🧠 Insights: Deep Analysis of This Indent")
+        st.markdown(
+            "*A comprehensive narrative — document interrelationships, "
+            "strengths, weaknesses, and recommendations specific to "
+            "this indent and procurement type.*"
+        )
+
+        indent_insight_key = f"indent_insight_{report.indent_id}"
+
+        if indent_insight_key not in st.session_state:
+            if st.button(
+                "🔍 Generate Insights (1 LLM call)",
+                key=f"gen_indent_{report.indent_id}",
+            ):
+                with st.spinner("Generating insights (15-20 seconds)..."):
+                    from src.insight_generator import generate_indent_insight
+                    insight = generate_indent_insight(
+                        extraction, report, standard
+                    )
+                    st.session_state[indent_insight_key] = insight
+                st.rerun()
+        else:
+            insight = st.session_state[indent_insight_key]
+
+            # Display as nicely formatted sections
+            # Split by numbered sections if present
+            paragraphs = [
+                p.strip()
+                for p in insight.split("\n")
+                if p.strip()
+            ]
+
+            st.markdown(
+                f'<div style="background:white;border-radius:12px;'
+                f'padding:2rem;border:1px solid #E8EBF0;'
+                f'line-height:1.9;font-size:0.95rem;color:#1F2937;">'
+                + "<br><br>".join(
+                    f'<p style="margin:0 0 0.5rem 0;">{p}</p>'
+                    for p in paragraphs
+                )
+                + '</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            col_dl, col_regen = st.columns(2)
+            with col_dl:
+                st.download_button(
+                    "⬇️ Download Insights",
+                    data=insight,
+                    file_name=f"{report.indent_id}_insights.txt",
+                    mime="text/plain",
+                )
+            with col_regen:
+                if st.button(
+                    "🔄 Regenerate",
+                    key=f"regen_indent_{report.indent_id}",
+                ):
+                    del st.session_state[indent_insight_key]
+                    st.rerun()
 
     else:
         st.markdown("""
