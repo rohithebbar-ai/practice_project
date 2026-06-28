@@ -1,13 +1,5 @@
 """
-app.py — Procurement Indent Analyser (v6)
-─────────────────────────────────────────
-Features:
-  - Domain selector: Civil / Electromechanical
-  - Standard Practice viewer
-  - Upload + compare new indent
-  - stdout redirect fix for WinError 233
-  - Session state cleared on domain switch
-  - Folder upload + multi-file upload
+app.py — Procurement Indent Analyser (v7)
 """
 
 import streamlit as st
@@ -19,7 +11,6 @@ import sys
 import io
 from pathlib import Path
 
-# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Procurement Indent Analyser",
     page_icon="📋",
@@ -27,12 +18,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Path setup ────────────────────────────────────────────────────────────────
 _APP_DIR = Path(__file__).parent
 if str(_APP_DIR) not in sys.path:
     sys.path.insert(0, str(_APP_DIR))
 
-# ── Domain configuration ──────────────────────────────────────────────────────
 DOMAINS = {
     "🏗 Civil": {
         "key":         "civil",
@@ -48,22 +37,39 @@ DOMAINS = {
     },
 }
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+.stApp { background-color: #F7F8FA; }
+.metric-tile {
+    background:white;border-radius:10px;padding:1rem 1.25rem;
+    border:1px solid #E8EBF0;box-shadow:0 1px 3px rgba(0,0,0,0.05);
+}
+.metric-value { font-size:1.6rem;font-weight:700; }
+.metric-label {
+    font-size:0.72rem;color:#6B7280;font-weight:500;
+    text-transform:uppercase;letter-spacing:0.05em;
+}
+.practice-card {
+    background:white;border-radius:10px;padding:1rem 1.25rem;
+    margin-bottom:0.75rem;border:1px solid #E8EBF0;
+}
+.finding-row {
+    display:flex;gap:0.6rem;padding:0.7rem 0.9rem;
+    margin-bottom:0.5rem;border-radius:0 8px 8px 0;
+    align-items:flex-start;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 @st.cache_data
 def load_standard(path: str):
     p = _APP_DIR / path
     if p.exists():
         return json.loads(p.read_text(encoding="utf-8"))
     return None
-
-
-def status_icon(status):
-    return {
-        "pass":    "✅",
-        "fail":    "❌",
-        "warning": "⚠️",
-        "info":    "ℹ️",
-    }.get(status, "•")
 
 
 def grade_color(grade):
@@ -83,31 +89,86 @@ def score_color(score):
 
 
 def render_findings(findings):
+    """
+    Render findings with clear labels explaining what each status means.
+    ✅ Met — confirmed present in indent
+    ⚠️ Missing from standard — required by standard but not found in indent
+    💡 Needs review — could not fully verify
+    """
     if not findings:
         st.markdown(
             '<p style="color:#9CA3AF;font-size:0.85rem;">No findings.</p>',
             unsafe_allow_html=True,
         )
         return
+
     for f in findings:
-        icon  = status_icon(f.status)
-        color = {
-            "pass":    "#059669",
-            "fail":    "#DC2626",
-            "warning": "#D97706",
-            "info":    "#6B7280",
-        }.get(f.status, "#6B7280")
+        if f.status == "pass":
+            icon         = "✅"
+            bg_color     = "#F0FDF4"
+            border_color = "#22C55E"
+            label        = "Met"
+            label_color  = "#166534"
+            title_color  = "#111827"
+        elif f.status == "fail":
+            icon         = "❌"
+            bg_color     = "#FFF1F2"
+            border_color = "#F43F5E"
+            label        = "Missing — required by standard"
+            label_color  = "#BE123C"
+            title_color  = "#111827"
+        elif f.status == "warning":
+            icon         = "⚠️"
+            bg_color     = "#FFFBEB"
+            border_color = "#F59E0B"
+            label        = "Partially met — review recommended"
+            label_color  = "#92400E"
+            title_color  = "#111827"
+        else:
+            icon         = "ℹ️"
+            bg_color     = "#F0F9FF"
+            border_color = "#38BDF8"
+            label        = "Info"
+            label_color  = "#0369A1"
+            title_color  = "#111827"
+
         st.markdown(f"""
-        <div style="display:flex;gap:0.6rem;padding:0.55rem 0;
-                    border-bottom:1px solid #F3F4F6;align-items:flex-start;">
-            <span style="font-size:1rem;margin-top:0.05rem;">{icon}</span>
-            <div>
-                <div style="font-size:0.875rem;font-weight:500;
-                            color:#111827;">{f.title}</div>
+        <div style="display:flex;gap:0.6rem;padding:0.7rem 0.9rem;
+                    margin-bottom:0.5rem;background:{bg_color};
+                    border-left:3px solid {border_color};
+                    border-radius:0 8px 8px 0;align-items:flex-start;">
+            <span style="font-size:1rem;margin-top:0.1rem;">{icon}</span>
+            <div style="flex:1;">
+                <div style="display:flex;align-items:center;
+                            gap:0.5rem;flex-wrap:wrap;">
+                    <span style="font-size:0.875rem;font-weight:600;
+                                 color:{title_color};">{f.title}</span>
+                    <span style="font-size:0.7rem;font-weight:500;
+                                 color:{label_color};background:white;
+                                 padding:0.1rem 0.5rem;border-radius:20px;
+                                 border:1px solid {border_color};">
+                        {label}
+                    </span>
+                </div>
                 <div style="font-size:0.78rem;color:#6B7280;
-                            margin-top:0.1rem;">{f.detail}</div>
+                            margin-top:0.2rem;">{f.detail}</div>
             </div>
         </div>""", unsafe_allow_html=True)
+
+
+def render_findings_legend():
+    st.markdown("""
+    <div style="background:#F9FAFB;border-radius:8px;
+                padding:0.75rem 1rem;margin-bottom:1rem;
+                font-size:0.8rem;color:#374151;
+                border:1px solid #E5E7EB;">
+        <b>How to read findings:</b>&nbsp;&nbsp;
+        ✅ <b>Met</b> — confirmed present in this indent &nbsp;|&nbsp;
+        ❌ <b>Missing — required by standard</b> — the standard says
+        this must be present but it was not found in your documents &nbsp;|&nbsp;
+        ⚠️ <b>Partially met</b> — present but incomplete, review recommended
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def render_practice_list(items, key_field="practice",
@@ -126,9 +187,7 @@ def render_practice_list(items, key_field="practice",
         reason = item.get(reason_field, "")
         freq   = item.get(freq_field, 0)
         st.markdown(f"""
-        <div style="background:white;border-radius:10px;
-                    padding:1rem 1.25rem;margin-bottom:0.75rem;
-                    border:1px solid #E8EBF0;">
+        <div class="practice-card">
             <div style="font-size:0.9rem;font-weight:600;
                         color:#111827;margin-bottom:0.3rem;">{title}</div>
             <div style="font-size:0.8rem;color:#6B7280;">{reason}</div>
@@ -155,14 +214,14 @@ def render_weak_list(items):
         fix    = item.get("how_to_fix", "")
         freq   = item.get("source_frequency", 0)
         st.markdown(f"""
-        <div style="background:white;border-radius:10px;
-                    padding:1rem 1.25rem;margin-bottom:0.75rem;
-                    border:1px solid #E8EBF0;
-                    border-left:3px solid #F43F5E;">
+        <div class="practice-card"
+             style="border-left:3px solid #F43F5E;">
             <div style="font-size:0.9rem;font-weight:600;
-                        color:#881337;margin-bottom:0.3rem;">⚠ {issue}</div>
+                        color:#881337;margin-bottom:0.3rem;">
+                ⚠ {issue}
+            </div>
             {f'<div style="font-size:0.8rem;color:#6B7280;"><b>Impact:</b> {impact}</div>' if impact else ''}
-            {f'<div style="font-size:0.8rem;color:#059669;"><b>Fix:</b> {fix}</div>' if fix else ''}
+            {f'<div style="font-size:0.8rem;color:#059669;margin-top:0.2rem;"><b>How to fix:</b> {fix}</div>' if fix else ''}
             <span style="display:inline-block;background:#F3F4F6;
                          border-radius:20px;padding:0.15rem 0.6rem;
                          font-size:0.72rem;color:#374151;margin-top:0.4rem;">
@@ -171,10 +230,111 @@ def render_weak_list(items):
         </div>""", unsafe_allow_html=True)
 
 
+def folder_upload_component(key="folder_upload"):
+    html = """
+    <style>
+    *{box-sizing:border-box;font-family:'Segoe UI',sans-serif;}
+    .fz{border:2px dashed #D1D5DB;border-radius:12px;padding:2rem;
+        text-align:center;background:white;cursor:pointer;transition:all 0.2s;}
+    .fz:hover,.fz.over{border-color:#3B82F6;background:#EFF6FF;}
+    .fb{display:inline-block;margin-top:0.75rem;padding:0.4rem 1rem;
+        background:#1B2A4A;color:white;border-radius:8px;font-size:0.85rem;}
+    .fl{margin-top:0.75rem;text-align:left;max-height:150px;overflow-y:auto;}
+    .fr{display:flex;align-items:center;gap:0.5rem;padding:0.3rem 0.4rem;
+        border-radius:6px;font-size:0.78rem;color:#374151;}
+    .fe{font-size:0.68rem;background:#E5E7EB;padding:0.1rem 0.35rem;
+        border-radius:4px;font-family:monospace;min-width:34px;text-align:center;}
+    .pb{height:3px;background:#E5E7EB;border-radius:2px;
+        margin-top:0.75rem;overflow:hidden;display:none;}
+    .pf{height:100%;background:linear-gradient(90deg,#3B82F6,#1D4ED8);
+        transition:width 0.3s;width:0%;}
+    .sm{font-size:0.78rem;color:#6B7280;margin-top:0.4rem;display:none;}
+    </style>
+    <input type="file" id="fi" webkitdirectory directory multiple
+           accept=".pdf,.docx,.xlsx,.xls,.xlsm,.txt" style="display:none;">
+    <div class="fz" id="fz" onclick="document.getElementById('fi').click()">
+        <div style="font-size:2rem;">📁</div>
+        <div style="font-size:0.95rem;font-weight:600;color:#111827;">
+            Click to select indent folder</div>
+        <div style="font-size:0.78rem;color:#6B7280;">
+            Chrome / Edge only</div>
+        <div class="fb" onclick="event.stopPropagation();
+             document.getElementById('fi').click()">Browse Folder</div>
+        <div class="pb" id="pb"><div class="pf" id="pf"></div></div>
+        <div class="sm" id="sm"></div>
+        <div class="fl" id="fl"></div>
+    </div>
+    <script>
+    const AL=['pdf','docx','xlsx','xls','xlsm','txt'];
+    function ext(n){return n.split('.').pop().toLowerCase();}
+    function sz(b){
+        if(b<1024)return b+'B';
+        if(b<1048576)return(b/1024).toFixed(1)+'KB';
+        return(b/1048576).toFixed(1)+'MB';
+    }
+    async function go(files){
+        const f=Array.from(files).filter(x=>AL.includes(ext(x.name)));
+        if(!f.length){
+            document.getElementById('sm').style.display='block';
+            document.getElementById('sm').textContent='No supported files.';
+            return;
+        }
+        const pb=document.getElementById('pb');
+        const pf=document.getElementById('pf');
+        const sm=document.getElementById('sm');
+        const fl=document.getElementById('fl');
+        pb.style.display='block';sm.style.display='block';fl.innerHTML='';
+        const res=[];
+        for(let i=0;i<f.length;i++){
+            const x=f[i];
+            sm.textContent='Reading '+x.name+'... ('+(i+1)+'/'+f.length+')';
+            pf.style.width=((i+1)/f.length*100)+'%';
+            const b64=await new Promise(r=>{
+                const rd=new FileReader();
+                rd.onload=e=>{
+                    const a=new Uint8Array(e.target.result);
+                    let s='';for(let j=0;j<a.byteLength;j++)
+                        s+=String.fromCharCode(a[j]);
+                    r(btoa(s));
+                };
+                rd.readAsArrayBuffer(x);
+            });
+            res.push({name:x.name,content_b64:b64,
+                      size:x.size,ext:ext(x.name)});
+            fl.innerHTML+='<div class="fr"><span class="fe">'+
+                ext(x.name).toUpperCase()+'</span><span>'+x.name+
+                '</span><span style="margin-left:auto;color:#9CA3AF;">'+
+                sz(x.size)+'</span></div>';
+        }
+        sm.textContent='✓ '+f.length+' file(s) ready';
+        window.parent.postMessage(
+            {type:'streamlit:setComponentValue',value:res},'*');
+    }
+    document.getElementById('fi').addEventListener(
+        'change',e=>go(e.target.files));
+    const fz=document.getElementById('fz');
+    fz.addEventListener('dragover',e=>{
+        e.preventDefault();fz.classList.add('over');});
+    fz.addEventListener('dragleave',()=>fz.classList.remove('over'));
+    fz.addEventListener('drop',e=>{
+        e.preventDefault();fz.classList.remove('over');
+        const f=[];
+        if(e.dataTransfer.items){
+            for(let i of e.dataTransfer.items)
+                if(i.kind==='file')f.push(i.getAsFile());
+        }else{
+            for(let x of e.dataTransfer.files)f.push(x);
+        }
+        go(f);
+    });
+    </script>
+    """
+    return components.html(html, height=300, scrolling=False)
+
+
 def run_analysis(file_items, indent_name):
-    """Extract indent — stdout redirected to fix WinError 233."""
     old_stdout = sys.stdout
-    sys.stdout = io.StringIO()
+    sys.stdout  = io.StringIO()
     result = {}
     try:
         from src.document_parser   import parse_file
@@ -229,115 +389,14 @@ def run_analysis(file_items, indent_name):
 
 
 def run_comparison(extraction, standard):
-    """Compare — stdout redirected to fix WinError 233."""
     old_stdout = sys.stdout
-    sys.stdout = io.StringIO()
+    sys.stdout  = io.StringIO()
     try:
         from src.indent_comparator import compare_indent_to_standard
         report = compare_indent_to_standard(extraction, standard)
     finally:
         sys.stdout = old_stdout
     return report
-
-
-# ── Folder upload component ───────────────────────────────────────────────────
-def folder_upload_component(key="folder_upload"):
-    html = """
-    <style>
-    *{box-sizing:border-box;font-family:'Segoe UI',sans-serif;}
-    .fz{border:2px dashed #D1D5DB;border-radius:12px;padding:2rem;
-        text-align:center;background:white;cursor:pointer;transition:all 0.2s;}
-    .fz:hover,.fz.over{border-color:#3B82F6;background:#EFF6FF;}
-    .fi{font-size:2rem;margin-bottom:0.5rem;}
-    .ft{font-size:0.95rem;font-weight:600;color:#111827;}
-    .fs{font-size:0.78rem;color:#6B7280;}
-    .fb{display:inline-block;margin-top:0.75rem;padding:0.4rem 1rem;
-        background:#1B2A4A;color:white;border-radius:8px;
-        font-size:0.85rem;cursor:pointer;}
-    .fb:hover{background:#2D4A7A;}
-    .fl{margin-top:0.75rem;text-align:left;max-height:150px;overflow-y:auto;}
-    .fr{display:flex;align-items:center;gap:0.5rem;padding:0.3rem 0.4rem;
-        border-radius:6px;font-size:0.78rem;color:#374151;}
-    .fr:hover{background:#F3F4F6;}
-    .fe{font-size:0.68rem;background:#E5E7EB;padding:0.1rem 0.35rem;
-        border-radius:4px;font-family:monospace;color:#4B5563;
-        min-width:34px;text-align:center;}
-    .pb{height:3px;background:#E5E7EB;border-radius:2px;
-        margin-top:0.75rem;overflow:hidden;display:none;}
-    .pf{height:100%;background:linear-gradient(90deg,#3B82F6,#1D4ED8);
-        transition:width 0.3s;width:0%;}
-    .sm{font-size:0.78rem;color:#6B7280;margin-top:0.4rem;display:none;}
-    </style>
-    <input type="file" id="fi" webkitdirectory directory multiple
-           accept=".pdf,.docx,.xlsx,.xls,.xlsm,.txt" style="display:none;">
-    <div class="fz" id="fz" onclick="document.getElementById('fi').click()">
-        <div class="fi">📁</div>
-        <div class="ft">Click to select indent folder</div>
-        <div class="fs">Chrome / Edge only — or use Multi-File Upload</div>
-        <div class="fb" onclick="event.stopPropagation();
-             document.getElementById('fi').click()">Browse Folder</div>
-        <div class="pb" id="pb"><div class="pf" id="pf"></div></div>
-        <div class="sm" id="sm"></div>
-        <div class="fl" id="fl"></div>
-    </div>
-    <script>
-    const AL=['pdf','docx','xlsx','xls','xlsm','txt'];
-    function ext(n){return n.split('.').pop().toLowerCase();}
-    function sz(b){
-        if(b<1024)return b+'B';
-        if(b<1048576)return(b/1024).toFixed(1)+'KB';
-        return(b/1048576).toFixed(1)+'MB';
-    }
-    async function go(files){
-        const f=Array.from(files).filter(x=>AL.includes(ext(x.name)));
-        if(!f.length){
-            document.getElementById('sm').style.display='block';
-            document.getElementById('sm').textContent='No supported files.';
-            return;
-        }
-        const pb=document.getElementById('pb');
-        const pf=document.getElementById('pf');
-        const sm=document.getElementById('sm');
-        const fl=document.getElementById('fl');
-        pb.style.display='block';sm.style.display='block';fl.innerHTML='';
-        const res=[];
-        for(let i=0;i<f.length;i++){
-            const x=f[i];
-            sm.textContent=`Reading ${x.name}... (${i+1}/${f.length})`;
-            pf.style.width=((i+1)/f.length*100)+'%';
-            const b64=await new Promise(r=>{
-                const rd=new FileReader();
-                rd.onload=e=>{
-                    const a=new Uint8Array(e.target.result);
-                    let s='';for(let j=0;j<a.byteLength;j++)s+=String.fromCharCode(a[j]);
-                    r(btoa(s));
-                };
-                rd.readAsArrayBuffer(x);
-            });
-            res.push({name:x.name,content_b64:b64,size:x.size,ext:ext(x.name)});
-            fl.innerHTML+=`<div class="fr">
-                <span class="fe">${ext(x.name).toUpperCase()}</span>
-                <span>${x.name}</span>
-                <span style="margin-left:auto;color:#9CA3AF;font-size:0.7rem;">${sz(x.size)}</span>
-            </div>`;
-        }
-        sm.textContent=`✓ ${f.length} file(s) ready`;
-        window.parent.postMessage({type:'streamlit:setComponentValue',value:res},'*');
-    }
-    document.getElementById('fi').addEventListener('change',e=>go(e.target.files));
-    const fz=document.getElementById('fz');
-    fz.addEventListener('dragover',e=>{e.preventDefault();fz.classList.add('over');});
-    fz.addEventListener('dragleave',()=>fz.classList.remove('over'));
-    fz.addEventListener('drop',e=>{
-        e.preventDefault();fz.classList.remove('over');
-        const f=[];
-        if(e.dataTransfer.items){for(let i of e.dataTransfer.items)if(i.kind==='file')f.push(i.getAsFile());}
-        else{for(let x of e.dataTransfer.files)f.push(x);}
-        go(f);
-    });
-    </script>
-    """
-    return components.html(html, height=300, scrolling=False)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -357,10 +416,11 @@ with st.sidebar:
     domain = DOMAINS[selected]
     st.caption(domain["description"])
 
-    # ── Clear session when domain changes ─────────────────────────────────────
+    # Clear session on domain switch
     if st.session_state.get("active_domain") != domain["key"]:
-        # Domain switched — clear everything
-        for key in ["report", "extraction", "file_items"]:
+        for key in ["report", "extraction",
+                    f"standard_insight_{domain['key']}",
+                    f"indent_insight_New_Indent"]:
             if key in st.session_state:
                 del st.session_state[key]
         st.session_state["active_domain"] = domain["key"]
@@ -376,7 +436,7 @@ with st.sidebar:
     st.caption("Procurement Intelligence System\nTata Steel")
 
 
-# ── Load standard ─────────────────────────────────────────────────────────────
+# Load standard
 standard = load_standard(domain["standard"])
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -407,22 +467,19 @@ if standard:
     meta = standard.get("_metadata", {})
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     for col, val, label in [
-        (c1, meta.get("source_indents", "?"),                        "Indents"),
-        (c2, len(standard.get("mandatory_practices", [])),           "Mandatory"),
-        (c3, len(standard.get("documentation_requirements", [])),    "Doc Req"),
-        (c4, len(standard.get("risk_controls", [])),                 "Risks"),
-        (c5, len(standard.get("common_good_practices", [])),         "Good Practices"),
-        (c6, len(standard.get("common_weak_practices", [])),         "Weak Areas"),
+        (c1, meta.get("source_indents", "?"),                     "Indents"),
+        (c2, len(standard.get("mandatory_practices", [])),        "Mandatory"),
+        (c3, len(standard.get("documentation_requirements", [])), "Doc Req"),
+        (c4, len(standard.get("risk_controls", [])),              "Risks"),
+        (c5, len(standard.get("common_good_practices", [])),      "Good Practices"),
+        (c6, len(standard.get("common_weak_practices", [])),      "Weak Areas"),
     ]:
         with col:
             st.markdown(f"""
-            <div style="background:white;border-radius:10px;
-                        padding:1rem 1.25rem;border:1px solid #E8EBF0;">
-                <div style="font-size:1.6rem;font-weight:700;
-                            color:#1B2A4A;">{val}</div>
-                <div style="font-size:0.72rem;color:#6B7280;
-                            font-weight:500;text-transform:uppercase;
-                            letter-spacing:0.05em;">{label}</div>
+            <div class="metric-tile">
+                <div class="metric-value"
+                     style="color:#1B2A4A;">{val}</div>
+                <div class="metric-label">{label}</div>
             </div>""", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -450,11 +507,15 @@ if page == "📊 Standard Practice":
     ])
 
     with t1:
-        st.markdown("**Must be present in every indent.**")
+        st.markdown(
+            "**These practices must be present in every indent. "
+            "When a new indent is analysed, these are checked first — "
+            "any missing ones will show as ❌ Missing.**"
+        )
         render_practice_list(standard.get("mandatory_practices", []))
 
     with t2:
-        st.markdown("**Improve quality — should be present.**")
+        st.markdown("**Practices that improve quality — should be present.**")
         render_practice_list(standard.get("recommended_practices", []))
 
     with t3:
@@ -466,17 +527,16 @@ if page == "📊 Standard Practice":
         )
 
     with t4:
-        st.markdown("**Most frequent weaknesses — with fixes.**")
+        st.markdown("**Most frequent weaknesses found — with fixes.**")
         render_weak_list(standard.get("common_weak_practices", []))
 
     with t5:
+        st.markdown("**Risk areas and required controls.**")
         for item in standard.get("risk_controls", []):
             if not isinstance(item, dict):
                 continue
             st.markdown(f"""
-            <div style="background:white;border-radius:10px;
-                        padding:1rem 1.25rem;margin-bottom:0.75rem;
-                        border:1px solid #E8EBF0;">
+            <div class="practice-card">
                 <div style="font-size:0.9rem;font-weight:600;color:#111827;">
                     🛡 {item.get('risk_area','')}: {item.get('control','')}
                 </div>
@@ -491,20 +551,23 @@ if page == "📊 Standard Practice":
             </div>""", unsafe_allow_html=True)
 
     with t6:
+        st.markdown(
+            "**Document types required. Any missing from a new indent "
+            "will show as ❌ Missing in the Documents findings tab.**"
+        )
         render_practice_list(
             standard.get("documentation_requirements", []),
             key_field="requirement",
         )
 
     with t7:
+        st.markdown("**How each document type should be structured.**")
         for item in standard.get("document_structure_standards", []):
             if not isinstance(item, dict):
                 continue
             sections = item.get("recommended_sections", [])
             st.markdown(f"""
-            <div style="background:white;border-radius:10px;
-                        padding:1rem 1.25rem;margin-bottom:0.75rem;
-                        border:1px solid #E8EBF0;">
+            <div class="practice-card">
                 <div style="font-size:0.9rem;font-weight:600;color:#111827;">
                     📄 {item.get('document_type','')}
                     <span style="color:#6B7280;font-weight:400;">
@@ -518,6 +581,9 @@ if page == "📊 Standard Practice":
             </div>""", unsafe_allow_html=True)
 
     with t8:
+        st.markdown(
+            "**How the procurement category shapes each document type.**"
+        )
         grouped: dict = {}
         for item in standard.get("category_specific_patterns", []):
             if not isinstance(item, dict):
@@ -528,9 +594,7 @@ if page == "📊 Standard Practice":
             st.markdown(f"**📦 {pt}**")
             for p in patterns:
                 st.markdown(f"""
-                <div style="background:white;border-radius:10px;
-                            padding:1rem 1.25rem;margin-bottom:0.75rem;
-                            border:1px solid #E8EBF0;">
+                <div class="practice-card">
                     <div style="font-size:0.9rem;font-weight:600;
                                 color:#111827;">
                         📄 {p.get('document_type','')}
@@ -538,9 +602,10 @@ if page == "📊 Standard Practice":
                     <div style="font-size:0.8rem;color:#6B7280;">
                         {p.get('pattern','')}
                     </div>
-                    {f'<div style="font-size:0.8rem;color:#1E40AF;">→ {p.get("recommendation","")}</div>' if p.get('recommendation') else ''}
+                    {f'<div style="font-size:0.8rem;color:#1E40AF;margin-top:0.2rem;">→ {p.get("recommendation","")}</div>' if p.get('recommendation') else ''}
                 </div>""", unsafe_allow_html=True)
 
+    # Download
     st.markdown("<br>", unsafe_allow_html=True)
     st.download_button(
         f"⬇️ Download {domain['display']} Standard (JSON)",
@@ -549,12 +614,12 @@ if page == "📊 Standard Practice":
         mime="application/json",
     )
 
-    # ── Standard Practice Narrative ───────────────────────────────────────────
+    # ── Standard Insights ─────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("## 🧠 Insights: What This Standard Tells Us")
     st.markdown(
-        "*A natural language summary of what was learned from all "
-        "historical indents — patterns, interrelationships, and key insights.*"
+        "*Natural language summary of what was learned from all historical "
+        "indents — patterns, interrelationships, and key findings.*"
     )
 
     insight_key = f"standard_insight_{domain['key']}"
@@ -562,30 +627,35 @@ if page == "📊 Standard Practice":
     if insight_key not in st.session_state:
         if st.button(
             "🔍 Generate Insights (1 LLM call)",
-            key=f"gen_insight_{domain['key']}",
+            key=f"gen_std_{domain['key']}",
         ):
             with st.spinner("Generating insights (10-15 seconds)..."):
-                from src.insight_generator import generate_standard_insight
-                insight = generate_standard_insight(standard)
+                old_stdout = sys.stdout
+                sys.stdout = io.StringIO()
+                try:
+                    from src.insight_generator import generate_standard_insight
+                    insight = generate_standard_insight(standard)
+                finally:
+                    sys.stdout = old_stdout
                 st.session_state[insight_key] = insight
             st.rerun()
     else:
         insight = st.session_state[insight_key]
-        st.markdown(
-            f'<div style="background:white;border-radius:12px;'
-            f'padding:2rem;border:1px solid #E8EBF0;'
-            f'line-height:1.8;font-size:0.95rem;color:#1F2937;">'
-            f'{insight.replace(chr(10), "<br>")}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(insight)
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button(
-            "🔄 Regenerate",
-            key=f"regen_insight_{domain['key']}",
-        ):
-            del st.session_state[insight_key]
-            st.rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                "⬇️ Download Insights",
+                data=insight,
+                file_name=f"{domain['key']}_standard_insights.txt",
+                mime="text/plain",
+                key=f"dl_std_{domain['key']}",
+            )
+        with col2:
+            if st.button("🔄 Regenerate", key=f"regen_std_{domain['key']}"):
+                del st.session_state[insight_key]
+                st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -594,7 +664,6 @@ if page == "📊 Standard Practice":
 
 elif page == "🔍 Analyse New Indent":
     st.markdown(f"## 🔍 Analyse New Indent — {domain['display']}")
-
     st.markdown("### Upload Indent Documents")
 
     mode = st.radio(
@@ -602,13 +671,13 @@ elif page == "🔍 Analyse New Indent":
         options=["📁 Folder Upload", "📄 Multi-File Upload", "🗂 Single File"],
         horizontal=True,
         label_visibility="collapsed",
-        key=f"upload_mode_{domain['key']}",  # unique key per domain
+        key=f"mode_{domain['key']}",
     )
 
     indent_name = st.text_input(
         "Indent name (optional)",
         placeholder="e.g. Indent - 36156 - Precast Drains",
-        key=f"indent_name_{domain['key']}",  # unique key per domain
+        key=f"name_{domain['key']}",
     ) or "New Indent"
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -622,14 +691,10 @@ elif page == "🔍 Analyse New Indent":
                     border-radius:8px;padding:0.6rem 1rem;
                     font-size:0.8rem;color:#92400E;margin-bottom:1rem;">
             💡 <b>Chrome / Edge only.</b>
-            If Analyse button stays greyed out, switch to
-            <b>Multi-File Upload</b>.
+            If Analyse button stays greyed out, use Multi-File Upload.
         </div>
         """, unsafe_allow_html=True)
-
-        folder_data = folder_upload_component(
-            key=f"folder_{domain['key']}"
-        )
+        folder_data = folder_upload_component(key=f"folder_{domain['key']}")
         if (folder_data and isinstance(folder_data, list)
                 and len(folder_data) > 0):
             file_items  = folder_data
@@ -660,7 +725,7 @@ elif page == "🔍 Analyse New Indent":
             type=["pdf", "docx", "xlsx", "xls", "xlsm", "txt"],
             accept_multiple_files=True,
             label_visibility="collapsed",
-            key=f"multi_{domain['key']}",  # unique key per domain
+            key=f"multi_{domain['key']}",
         )
         if uploaded:
             file_items  = uploaded
@@ -684,7 +749,7 @@ elif page == "🔍 Analyse New Indent":
             type=["pdf", "docx", "xlsx", "xls", "xlsm", "txt"],
             accept_multiple_files=False,
             label_visibility="collapsed",
-            key=f"single_{domain['key']}",  # unique key per domain
+            key=f"single_{domain['key']}",
         )
         if single:
             file_items  = [single]
@@ -696,11 +761,10 @@ elif page == "🔍 Analyse New Indent":
         "🔍  Analyse Indent",
         type="primary",
         disabled=not files_ready,
-        key=f"analyse_{domain['key']}",  # unique key per domain
+        key=f"analyse_{domain['key']}",
     )
     st.markdown("---")
 
-    # ── Run ───────────────────────────────────────────────────────────────────
     if analyse_btn and files_ready:
         with st.spinner("🤖 Extracting indent data (1 LLM call)..."):
             extraction = run_analysis(file_items, indent_name)
@@ -708,7 +772,6 @@ elif page == "🔍 Analyse New Indent":
         if "_error" in extraction:
             st.error(f"Extraction failed: {extraction['_error']}")
             st.stop()
-
         if not extraction:
             st.error("Extraction returned empty. Check documents.")
             st.stop()
@@ -716,10 +779,15 @@ elif page == "🔍 Analyse New Indent":
         with st.spinner("🔍 Comparing against standard (1 LLM call)..."):
             report = run_comparison(extraction, standard)
 
-        st.session_state["report"]     = report
-        st.session_state["extraction"] = extraction
+        # Clear old indent insight when new indent analysed
+        old_key = f"indent_insight_{st.session_state.get('last_indent_id','')}"
+        if old_key in st.session_state:
+            del st.session_state[old_key]
 
-    # ── Display ───────────────────────────────────────────────────────────────
+        st.session_state["report"]          = report
+        st.session_state["extraction"]      = extraction
+        st.session_state["last_indent_id"]  = report.indent_id
+
     if "report" in st.session_state:
         report     = st.session_state["report"]
         extraction = st.session_state["extraction"]
@@ -728,12 +796,12 @@ elif page == "🔍 Analyse New Indent":
             f"## Analysis: {report.indent_id.replace('_', ' ')}"
         )
 
+        # Score row
         c1, c2, c3, c4 = st.columns([1, 2, 2, 2])
         with c1:
             st.markdown(f"""
             <div style="background:white;border-radius:12px;
                         padding:1.5rem;text-align:center;
-                        box-shadow:0 1px 4px rgba(0,0,0,0.08);
                         border:1px solid #E8EBF0;">
                 <div style="font-size:3.5rem;font-weight:700;line-height:1;
                             color:{score_color(report.overall_score)};">
@@ -741,7 +809,7 @@ elif page == "🔍 Analyse New Indent":
                 </div>
                 <div style="font-size:0.72rem;color:#9CA3AF;
                             margin-top:0.25rem;">out of 100</div>
-                <div style="font-size:0.95rem;font-weight:600;
+                <div style="font-size:0.9rem;font-weight:600;
                             margin-top:0.5rem;padding:0.3rem 0.8rem;
                             border-radius:20px;display:inline-block;
                             background:{grade_color(report.overall_grade)}22;
@@ -751,12 +819,8 @@ elif page == "🔍 Analyse New Indent":
             </div>""", unsafe_allow_html=True)
         with c2:
             st.markdown(f"""
-            <div style="background:white;border-radius:10px;
-                        padding:1rem 1.25rem;border:1px solid #E8EBF0;
-                        height:100%;">
-                <div style="font-size:0.72rem;color:#6B7280;
-                            text-transform:uppercase;">
-                    Procurement Type</div>
+            <div class="metric-tile" style="height:100%;">
+                <div class="metric-label">Procurement Type</div>
                 <div style="font-size:0.95rem;font-weight:600;
                             color:#111827;margin-top:0.4rem;">
                     {report.procurement_type}
@@ -764,34 +828,68 @@ elif page == "🔍 Analyse New Indent":
             </div>""", unsafe_allow_html=True)
         with c3:
             st.markdown(f"""
-            <div style="background:white;border-radius:10px;
-                        padding:1rem 1.25rem;border:1px solid #E8EBF0;
-                        height:100%;">
-                <div style="font-size:0.72rem;color:#6B7280;
-                            text-transform:uppercase;">
-                    Recommendations</div>
-                <div style="font-size:1.6rem;font-weight:700;
-                            color:#DC2626;">
-                    {len(report.recommendations)}
+            <div class="metric-tile" style="height:100%;">
+                <div class="metric-label">Missing from Standard</div>
+                <div class="metric-value" style="color:#DC2626;">
+                    {len(report.gaps)}
                 </div>
             </div>""", unsafe_allow_html=True)
         with c4:
             st.markdown(f"""
-            <div style="background:white;border-radius:10px;
-                        padding:1rem 1.25rem;border:1px solid #E8EBF0;
-                        height:100%;">
-                <div style="font-size:0.72rem;color:#6B7280;
-                            text-transform:uppercase;">Gaps Found</div>
-                <div style="font-size:1.6rem;font-weight:700;
-                            color:#D97706;">
-                    {len(report.gaps)}
+            <div class="metric-tile" style="height:100%;">
+                <div class="metric-label">Recommendations</div>
+                <div class="metric-value" style="color:#D97706;">
+                    {len(report.recommendations)}
                 </div>
             </div>""", unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
+        # Score explanation
+        total_checks = (
+            len(report.mandatory_findings) +
+            len(report.documentation_findings) +
+            len(report.risk_findings) +
+            len(report.vendor_findings) +
+            len(report.approval_findings)
+        )
+        met     = sum(1 for f in (
+            report.mandatory_findings + report.documentation_findings +
+            report.risk_findings + report.vendor_findings +
+            report.approval_findings
+        ) if f.status == "pass")
+        missing = sum(1 for f in (
+            report.mandatory_findings + report.documentation_findings +
+            report.risk_findings + report.vendor_findings +
+            report.approval_findings
+        ) if f.status == "fail")
+        partial = sum(1 for f in (
+            report.mandatory_findings + report.documentation_findings +
+            report.risk_findings + report.vendor_findings +
+            report.approval_findings
+        ) if f.status == "warning")
+
+        st.markdown(f"""
+        <div style="background:#F9FAFB;border-radius:8px;
+                    padding:0.75rem 1rem;margin-bottom:1rem;
+                    font-size:0.85rem;color:#374151;
+                    border:1px solid #E5E7EB;">
+            <b>Score of {report.overall_score}/100 explained:</b>
+            Out of {total_checks} standard checks —
+            <span style="color:#059669;font-weight:600;">
+                ✅ {met} met
+            </span> &nbsp;|&nbsp;
+            <span style="color:#DC2626;font-weight:600;">
+                ❌ {missing} missing from standard
+            </span> &nbsp;|&nbsp;
+            <span style="color:#D97706;font-weight:600;">
+                ⚠️ {partial} partially met
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
         if report.strengths:
-            st.markdown("### ⭐ Strengths")
+            st.markdown("### ✅ Strengths")
             for s in report.strengths:
                 st.markdown(
                     f'<div style="background:#F0FDF4;border-left:3px solid '
@@ -826,7 +924,10 @@ elif page == "🔍 Analyse New Indent":
                 )
             st.markdown("<br>", unsafe_allow_html=True)
 
+        # Findings legend + tabs
         st.markdown("### Detailed Findings")
+        render_findings_legend()
+
         (tab1, tab2, tab3, tab4,
          tab5, tab6, tab7, tab8) = st.tabs([
             f"✅ Mandatory ({len(report.mandatory_findings)})",
@@ -838,15 +939,44 @@ elif page == "🔍 Analyse New Indent":
             f"⭐ Good Practices ({len(report.good_practice_findings)})",
             f"⚠️ Weak Areas ({len(report.weak_practice_findings)})",
         ])
-        with tab1: render_findings(report.mandatory_findings)
-        with tab2: render_findings(report.documentation_findings)
-        with tab3: render_findings(report.risk_findings)
-        with tab4: render_findings(report.vendor_findings)
-        with tab5: render_findings(report.approval_findings)
-        with tab6: render_findings(report.structure_findings)
-        with tab7: render_findings(report.good_practice_findings)
-        with tab8: render_findings(report.weak_practice_findings)
+        with tab1:
+            st.caption(
+                "Checked against mandatory practices in the standard. "
+                "❌ means this practice is required by the standard "
+                "but was not found in your indent."
+            )
+            render_findings(report.mandatory_findings)
+        with tab2:
+            st.caption(
+                "Checked against required document types in the standard. "
+                "❌ means this document type should be present but is missing."
+            )
+            render_findings(report.documentation_findings)
+        with tab3:
+            st.caption(
+                "Risk controls from the standard checked against this indent."
+            )
+            render_findings(report.risk_findings)
+        with tab4:
+            st.caption("Vendor requirements from the standard.")
+            render_findings(report.vendor_findings)
+        with tab5:
+            st.caption("Approval requirements from the standard.")
+            render_findings(report.approval_findings)
+        with tab6:
+            st.caption(
+                "Document structure quality — how well each document "
+                "is organised compared to the standard's expectations."
+            )
+            render_findings(report.structure_findings)
+        with tab7:
+            st.caption("Good practices found in this indent.")
+            render_findings(report.good_practice_findings)
+        with tab8:
+            st.caption("Weaknesses found in this indent.")
+            render_findings(report.weak_practice_findings)
 
+        # Procurement summary
         st.markdown("<br>", unsafe_allow_html=True)
         with st.expander("📊 Extracted Procurement Summary", expanded=False):
             ps = extraction.get("procurement_summary", {}) or {}
@@ -884,13 +1014,13 @@ elif page == "🔍 Analyse New Indent":
                     <div style="padding:0.4rem 0;
                                 border-bottom:1px solid #F3F4F6;">
                         <span style="font-size:0.72rem;color:#9CA3AF;
-                                     text-transform:uppercase;
-                                     letter-spacing:0.05em;">{label}</span>
-                        <br>
+                                     text-transform:uppercase;">
+                            {label}</span><br>
                         <span style="font-size:0.875rem;font-weight:500;
                                      color:{color};">{display}</span>
                     </div>""", unsafe_allow_html=True)
 
+        # Downloads
         st.markdown("<br>", unsafe_allow_html=True)
         d1, d2 = st.columns(2)
         with d1:
@@ -904,25 +1034,25 @@ elif page == "🔍 Analyse New Indent":
             st.download_button(
                 "⬇️ Download Comparison Report",
                 data=json.dumps({
-                    "indent_id":       report.indent_id,
-                    "score":           report.overall_score,
-                    "grade":           report.overall_grade,
-                    "recommendations": report.recommendations,
-                    "gaps":            report.gaps,
-                    "strengths":       report.strengths,
+                    "indent_id":        report.indent_id,
+                    "score":            report.overall_score,
+                    "grade":            report.overall_grade,
+                    "recommendations":  report.recommendations,
+                    "gaps":             report.gaps,
+                    "strengths":        report.strengths,
                     "cross_doc_issues": report.cross_doc_issues,
                 }, indent=2),
                 file_name=f"{report.indent_id}_report.json",
                 mime="application/json",
             )
 
-        # ── Deep Indent Insight ───────────────────────────────────────────────
+        # ── Indent Insights ───────────────────────────────────────────────────
         st.markdown("---")
         st.markdown("## 🧠 Insights: Deep Analysis of This Indent")
         st.markdown(
-            "*A comprehensive narrative — document interrelationships, "
-            "strengths, weaknesses, and recommendations specific to "
-            "this indent and procurement type.*"
+            "*Comprehensive narrative — document interrelationships, "
+            "why this indent scored what it scored, strengths, weaknesses, "
+            "and specific recommendations for improvement.*"
         )
 
         indent_insight_key = f"indent_insight_{report.indent_id}"
@@ -933,36 +1063,21 @@ elif page == "🔍 Analyse New Indent":
                 key=f"gen_indent_{report.indent_id}",
             ):
                 with st.spinner("Generating insights (15-20 seconds)..."):
-                    from src.insight_generator import generate_indent_insight
-                    insight = generate_indent_insight(
-                        extraction, report, standard
-                    )
+                    old_stdout = sys.stdout
+                    sys.stdout = io.StringIO()
+                    try:
+                        from src.insight_generator import generate_indent_insight
+                        insight = generate_indent_insight(
+                            extraction, report, standard
+                        )
+                    finally:
+                        sys.stdout = old_stdout
                     st.session_state[indent_insight_key] = insight
                 st.rerun()
         else:
             insight = st.session_state[indent_insight_key]
-
-            # Display as nicely formatted sections
-            # Split by numbered sections if present
-            paragraphs = [
-                p.strip()
-                for p in insight.split("\n")
-                if p.strip()
-            ]
-
-            st.markdown(
-                f'<div style="background:white;border-radius:12px;'
-                f'padding:2rem;border:1px solid #E8EBF0;'
-                f'line-height:1.9;font-size:0.95rem;color:#1F2937;">'
-                + "<br><br>".join(
-                    f'<p style="margin:0 0 0.5rem 0;">{p}</p>'
-                    for p in paragraphs
-                )
-                + '</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown(insight)
             st.markdown("<br>", unsafe_allow_html=True)
-
             col_dl, col_regen = st.columns(2)
             with col_dl:
                 st.download_button(
@@ -970,6 +1085,7 @@ elif page == "🔍 Analyse New Indent":
                     data=insight,
                     file_name=f"{report.indent_id}_insights.txt",
                     mime="text/plain",
+                    key=f"dl_indent_{report.indent_id}",
                 )
             with col_regen:
                 if st.button(
