@@ -1,136 +1,121 @@
 """
 insight_generator.py
 ─────────────────────
-Two LLM-powered narrative generators:
-
-1. generate_standard_insight()
-   - Reads best_practice_standard.json
-   - Generates natural language summary of what the standard says
-   - Called once per domain (cached)
-
-2. generate_indent_insight()
-   - Reads indent extraction + comparison report
-   - Generates deep narrative analysis of the new indent
-   - Called after each new indent is compared
+Two narrative generators:
+1. generate_standard_insight() — what the standard says
+2. generate_indent_insight()   — deep analysis of a specific indent
 """
 
 import json
-from typing import Optional
+import sys
+import io
 
 
-# ── Prompt 1: Standard Practice Narrative ────────────────────────────────────
 STANDARD_INSIGHT_PROMPT = """
 You are a senior procurement governance expert at Tata Steel.
 
 You are given a best_practice_standard derived from analysis of multiple
-historical procurement indents across different categories.
+historical procurement indents.
 
-Write a comprehensive, natural language narrative that explains:
+Write a comprehensive natural language narrative covering:
 
 1. OVERVIEW
-   - How many indents were analysed and what procurement categories emerged
-   - The overall quality and maturity of procurement practices observed
+   How many indents were analysed, what procurement categories emerged,
+   and the overall quality of procurement practices observed.
 
 2. WHAT GOOD INDENTS DO WELL
-   - The most common good practices observed across indents
-   - Which categories consistently produce well-structured indents
-   - Specific document structure patterns that work well
+   The most common good practices. Which categories produce well-structured
+   indents. Specific document patterns that work well.
 
-3. COMMON WEAKNESSES AND GAPS
-   - The most frequent issues found across indents
-   - Which document types are most commonly poorly structured
-   - Cross-document inconsistencies that appear repeatedly
+3. COMMON WEAKNESSES
+   The most frequent issues. Which document types are most poorly structured.
+   Cross-document inconsistencies that appear repeatedly.
 
-4. INTERRELATIONSHIPS BETWEEN DOCUMENTS AND CATEGORIES
-   - How the procurement category shapes the way documents are written
-   - For example: how a Civil BOQ differs from a Supply BOQ
-   - How safety documents differ by work type
-   - Pattern of how scope in Technical Spec relates to BOQ items
+4. HOW CATEGORY SHAPES DOCUMENTS
+   How the procurement category changes the way documents are written.
+   For example: how a Civil BOQ differs from a Supply BOQ.
+   How safety documents differ by work type.
 
 5. MANDATORY REQUIREMENTS
-   - What every indent must have to be compliant
-   - Critical risk controls that must be addressed
+   What every indent must have. Critical risk controls that must be addressed.
 
-6. RECOMMENDATIONS FOR PROCUREMENT MANAGERS
-   - Top 5 most impactful improvements they can make
-   - Which document types need the most attention
+6. TOP RECOMMENDATIONS FOR PROCUREMENT MANAGERS
+   The 5 most impactful improvements they can make right now.
 
-Write in clear, professional prose. Use specific examples from the data.
-Do NOT use bullet points — write in flowing paragraphs.
+Write in clear professional prose. No bullet points — flowing paragraphs.
+Use markdown headers (###) for each section.
 Length: 600-800 words.
 Tone: Expert, authoritative, constructive.
 """
 
 
-# ── Prompt 2: Deep Indent Analysis Narrative ─────────────────────────────────
 INDENT_INSIGHT_PROMPT = """
 You are a senior procurement auditor at Tata Steel.
 
 You are given:
-1. indent_extraction — the extracted data from a new indent
-2. comparison_report — how this indent compares against the standard
-3. best_practice_standard — the gold standard for procurement
+1. indent_summary — key fields from the indent
+2. documents — each document with its structure, good practices, weaknesses
+3. comparison_report — score, grade, what passed and what failed
+4. standard_context — relevant standard practices for this category
 
-Write a deep, comprehensive narrative analysis of this specific indent.
-This is NOT a generic report — it must be specific to THIS indent's documents,
-procurement type, and findings.
+The comparison_report contains:
+- overall_score (0-100): the indent's score against the standard
+- overall_grade: Strong / Adequate / Needs Improvement / Weak
+- mandatory_fails: mandatory practices from the standard that are MISSING
+- doc_fails: required document types that are MISSING
+- gaps: all gaps found
+- strengths: what this indent does well
+- structure_issues: document structure problems found
 
-Structure your analysis as follows:
+Write a deep, specific narrative analysis of THIS indent.
+Reference actual document names and specific content from the data.
 
-1. INDENT OVERVIEW
-   - What is being procured, for which location, estimated cost
-   - What documents are present and their quality
-   - Overall procurement type and category
+Use these markdown sections:
 
-2. DOCUMENT INTERRELATIONSHIP ANALYSIS
-   - How do the documents in this indent relate to each other?
-   - Does the BOQ scope match the Technical Specification scope?
-   - Does the Safety document address the specific risks of this work type?
-   - Are there gaps between what the Tracker says and what documents show?
-   - Be very specific — reference actual document names and content
+### Indent Overview
+What is being procured, location, estimated cost, documents present.
 
-3. STRENGTHS — WHAT THIS INDENT DOES WELL
-   - Specific good practices with evidence from the documents
-   - How this indent compares to the best examples in the standard
-   - Which aspects are exemplary
+### Score Explanation
+This indent scored {score}/100 ({grade}). Explain specifically WHY —
+which mandatory practices are missing, which documents have gaps,
+which cross-document issues pulled the score down.
+Be specific: name the exact practices from mandatory_fails and doc_fails.
 
-4. WEAKNESSES AND GAPS — DEEP ANALYSIS
-   - For each weakness found, explain WHY it matters for this specific work
-   - How does missing a rate column in the BOQ affect this particular project?
-   - What are the procurement risks created by each gap?
-   - Cross-document inconsistencies and their implications
+### Document Interrelationship Analysis
+How do the documents relate to each other?
+Does the BOQ scope match the Technical Spec?
+Does the Safety document address the specific risks of this work?
+Are there gaps between what the Tracker says and what documents show?
+Reference actual document names.
 
-5. COMPARISON WITH STANDARD PRACTICES
-   - How does this indent compare to the established standard?
-   - Which mandatory practices are met and which are missing?
-   - Is this indent above or below average for its procurement category?
+### Strengths
+What this indent does well. Specific evidence from documents.
 
-6. SPECIFIC RECOMMENDATIONS
-   - Concrete, actionable improvements for this specific indent
-   - Priority order — what must be fixed before submission
-   - What would make this indent exemplary
+### Weaknesses — Deep Analysis
+For each weakness, explain WHY it matters for this specific work type.
+What procurement risk does it create?
+Reference actual document names and missing content.
 
-Write in clear, professional prose. Be specific and reference actual content
-from the indent — document names, values, specific issues found.
-Do NOT use bullet points — write in flowing paragraphs.
+### Comparison with Standard
+How does this indent compare to the established standard for this category?
+Which mandatory practices are met and which are missing?
+
+### Specific Recommendations
+Concrete, prioritised actions before submission.
+What would raise the score and what would make this indent exemplary.
+
+Write in professional prose. No bullet points — flowing paragraphs under
+each ### heading. Be specific and reference actual content from the indent.
 Length: 700-900 words.
-Tone: Expert, direct, constructive, specific.
 """
 
 
 def generate_standard_insight(standard: dict) -> str:
-    """
-    Generate natural language narrative of the standard practice.
-    Summarises what was learned from all historical indents.
-    """
+    """Generate narrative summary of the standard practice."""
     from src.llm_client import LLMClient
-    import sys
-    import io
 
-    # Trim standard to key sections for token efficiency
-    standard_trimmed = {
-        "total_indents":               standard.get("_metadata", {}).get("source_indents"),
-        "procurement_type_breakdown":  standard.get("_metadata", {}),
+    trimmed = {
+        "source_indents":              standard.get("_metadata", {}).get("source_indents"),
         "mandatory_practices":         standard.get("mandatory_practices", []),
         "recommended_practices":       standard.get("recommended_practices", [])[:5],
         "common_good_practices":       standard.get("common_good_practices", [])[:8],
@@ -139,13 +124,11 @@ def generate_standard_insight(standard: dict) -> str:
         "documentation_requirements":  standard.get("documentation_requirements", []),
         "document_structure_standards": standard.get("document_structure_standards", [])[:5],
         "category_specific_patterns":  standard.get("category_specific_patterns", [])[:8],
-        "representative_best_examples": standard.get("representative_best_examples", [])[:2],
-        "representative_worst_examples": standard.get("representative_worst_examples", [])[:2],
     }
 
     messages = [
         {"role": "system", "content": STANDARD_INSIGHT_PROMPT},
-        {"role": "user",   "content": json.dumps(standard_trimmed, indent=2)},
+        {"role": "user",   "content": json.dumps(trimmed, indent=2)},
     ]
 
     old_stdout = sys.stdout
@@ -164,46 +147,23 @@ def generate_indent_insight(
     report,
     standard: dict,
 ) -> str:
-    """
-    Generate deep natural language analysis of a specific indent.
-    Explains interrelationships, strengths, weaknesses, recommendations.
-    """
+    """Generate deep narrative analysis of a specific indent."""
     from src.llm_client import LLMClient
-    import sys
-    import io
 
     ps = extraction.get("procurement_summary", {}) or {}
-
-    # Build focused payload
-    indent_summary = {
-        "indent_id":           extraction.get("indent_id"),
-        "procurement_type":    ps.get("procurement_type"),
-        "package_description": ps.get("package_description"),
-        "scope_of_work":       ps.get("scope_of_work"),
-        "location":            ps.get("location"),
-        "estimated_cost":      ps.get("estimated_cost_crores"),
-        "vendor_panel":        ps.get("vendor_panel"),
-        "hse_plan":            ps.get("hse_plan_available"),
-        "technical_spec":      ps.get("technical_spec_attached"),
-        "job_risk":            ps.get("job_risk_category"),
-        "is_single_party":     ps.get("is_single_party"),
-        "approval_authority":  ps.get("approval_authority"),
-        "document_types":      ps.get("document_types_present", []),
-        "missing_documents":   ps.get("missing_documents", []),
-    }
 
     # Per-document summaries
     doc_summaries = []
     for doc in extraction.get("documents", []):
         ds = doc.get("document_structure", {}) or {}
         doc_summaries.append({
-            "name":             doc.get("document_name"),
-            "type":             doc.get("document_type"),
-            "summary":          doc.get("document_summary"),
+            "name":              doc.get("document_name"),
+            "type":              doc.get("document_type"),
+            "summary":           doc.get("document_summary"),
             "structure_quality": ds.get("structure_quality"),
-            "missing_sections": ds.get("missing_sections", []),
-            "notable_pattern":  ds.get("notable_pattern"),
-            "good_practices":   [
+            "missing_sections":  ds.get("missing_sections", []),
+            "notable_pattern":   ds.get("notable_pattern"),
+            "good_practices": [
                 p.get("practice") if isinstance(p, dict) else p
                 for p in doc.get("good_practices_observed", [])
             ],
@@ -213,53 +173,109 @@ def generate_indent_insight(
             ],
         })
 
+    # Build comparison summary with clear score context
+    mandatory_fails = [
+        f.title for f in report.mandatory_findings
+        if f.status == "fail"
+    ]
+    doc_fails = [
+        f.title for f in report.documentation_findings
+        if f.status == "fail"
+    ]
+    structure_issues = [
+        f"{f.title}: {f.detail}"
+        for f in report.structure_findings
+        if f.status in ("fail", "warning")
+    ]
+
+    total_checks = (
+        len(report.mandatory_findings) +
+        len(report.documentation_findings) +
+        len(report.risk_findings) +
+        len(report.vendor_findings) +
+        len(report.approval_findings)
+    )
+    met     = sum(1 for f in (
+        report.mandatory_findings + report.documentation_findings +
+        report.risk_findings + report.vendor_findings +
+        report.approval_findings
+    ) if f.status == "pass")
+    missing = sum(1 for f in (
+        report.mandatory_findings + report.documentation_findings +
+        report.risk_findings + report.vendor_findings +
+        report.approval_findings
+    ) if f.status == "fail")
+
     comparison_summary = {
         "overall_score":   report.overall_score,
         "overall_grade":   report.overall_grade,
-        "strengths":       report.strengths,
-        "gaps":            report.gaps,
-        "recommendations": report.recommendations,
+        "score_breakdown": (
+            f"{met} of {total_checks} standard checks passed, "
+            f"{missing} missing from standard"
+        ),
+        "mandatory_fails":  mandatory_fails,
+        "doc_fails":        doc_fails,
+        "structure_issues": structure_issues,
+        "strengths":        report.strengths,
+        "gaps":             report.gaps,
+        "recommendations":  report.recommendations,
         "cross_doc_issues": report.cross_doc_issues,
-        "mandatory_fails": [
-            f.title for f in report.mandatory_findings
-            if f.status == "fail"
-        ],
-        "doc_fails": [
-            f.title for f in report.documentation_findings
-            if f.status == "fail"
-        ],
-        "structure_issues": [
-            f"{f.title}: {f.detail}"
-            for f in report.structure_findings
-            if f.status in ("fail", "warning")
-        ],
     }
 
-    # Relevant standard context
-    standard_context = {
-        "mandatory_practices":    standard.get("mandatory_practices", [])[:5],
-        "common_weak_practices":  standard.get("common_weak_practices", [])[:5],
-        "category_patterns": [
-            p for p in standard.get("category_specific_patterns", [])
-            if ps.get("procurement_type", "").lower() in
-               p.get("procurement_type", "").lower()
-        ][:5],
-    }
+    # Relevant standard context for this procurement type
+    proc_type = ps.get("procurement_type", "").lower()
+    category_patterns = [
+        p for p in standard.get("category_specific_patterns", [])
+        if proc_type and proc_type.split("-")[0].strip() in
+           p.get("procurement_type", "").lower()
+    ][:5]
 
     payload = {
-        "indent_summary":    indent_summary,
-        "documents":         doc_summaries,
-        "comparison_report": comparison_summary,
-        "standard_context":  standard_context,
-        "good_practices":    extraction.get("good_practices", [])[:5],
-        "weak_items":        extraction.get("weak_items", [])[:5],
-        "category_document_patterns": extraction.get(
+        "indent_summary": {
+            "indent_id":           extraction.get("indent_id"),
+            "procurement_type":    ps.get("procurement_type"),
+            "package_description": ps.get("package_description"),
+            "scope_of_work":       (ps.get("scope_of_work") or "")[:500],
+            "location":            ps.get("location"),
+            "estimated_cost":      ps.get("estimated_cost_crores"),
+            "vendor_panel":        ps.get("vendor_panel"),
+            "hse_plan":            ps.get("hse_plan_available"),
+            "technical_spec":      ps.get("technical_spec_attached"),
+            "job_risk":            ps.get("job_risk_category"),
+            "is_single_party":     ps.get("is_single_party"),
+            "approval_authority":  ps.get("approval_authority"),
+            "document_types":      ps.get("document_types_present", []),
+            "missing_documents":   ps.get("missing_documents", []),
+        },
+        "documents":              doc_summaries,
+        "comparison_report":      comparison_summary,
+        "good_practices_found":   [
+            (p.get("practice") if isinstance(p, dict) else p)
+            for p in extraction.get("good_practices", [])[:5]
+        ],
+        "weak_items_found":       [
+            (w.get("issue") if isinstance(w, dict) else w)
+            for w in extraction.get("weak_items", [])[:5]
+        ],
+        "category_doc_patterns":  extraction.get(
             "category_document_patterns", []
         )[:5],
+        "standard_context": {
+            "mandatory_practices":   standard.get("mandatory_practices", [])[:5],
+            "common_weak_practices": standard.get("common_weak_practices", [])[:5],
+            "category_patterns":     category_patterns,
+        },
     }
 
+    # Inject score into prompt
+    prompt = INDENT_INSIGHT_PROMPT.replace(
+        "{score}", str(report.overall_score)
+    ).replace(
+        "{grade}", report.overall_grade
+    )
+
     messages = [
-        {"role": "system", "content": INDENT_INSIGHT_PROMPT},
+        {"role": "system", "content": prompt},
         {"role": "user",   "content": json.dumps(payload, indent=2, default=str)},
     ]
 
