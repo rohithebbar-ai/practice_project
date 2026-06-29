@@ -442,29 +442,6 @@ html, body, [class*="css"] {
     font-weight: 600 !important;
 }
 
-/* ── Insights block ──────────────────────────────────────────────────────── */
-.insight-block {
-    background: white;
-    border: 1px solid #E1E4E8;
-    border-radius: 6px;
-    padding: 1.75rem 2rem;
-    font-size: 0.9rem;
-    line-height: 1.85;
-    color: #1A1D23;
-}
-.insight-block h3 {
-    font-size: 0.8rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: #C8973A;
-    margin: 1.5rem 0 0.5rem 0;
-    padding-bottom: 0.3rem;
-    border-bottom: 1px solid #F4F5F7;
-}
-.insight-block h3:first-child { margin-top: 0; }
-.insight-block p { margin: 0 0 0.75rem 0; }
-
 /* ── Divider ─────────────────────────────────────────────────────────────── */
 .divider {
     height: 1px;
@@ -816,6 +793,60 @@ def run_comparison(extraction, standard):
     return report
 
 
+def _render_insight(insight: str):
+    """
+    Render insight text with proper styled headings.
+    Converts ### headings → gold uppercase headers.
+    Paragraphs get proper spacing and font.
+    """
+    import re
+
+    lines = insight.split("\n")
+    html  = []
+    para  = []
+
+    def flush_para():
+        text = " ".join(para).strip()
+        if text:
+            html.append(
+                f'<p style="margin:0 0 0.9rem 0;font-size:0.9rem;'
+                f'line-height:1.85;color:#1A1D23;">{text}</p>'
+            )
+        para.clear()
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.startswith("###") or stripped.startswith("##"):
+            flush_para()
+            heading = re.sub(r"^#+\s*", "", stripped).strip()
+            html.append(
+                f'<div style="font-size:0.72rem;font-weight:700;'
+                f'text-transform:uppercase;letter-spacing:0.12em;'
+                f'color:#C8973A;margin:1.75rem 0 0.6rem 0;'
+                f'padding-bottom:0.35rem;'
+                f'border-bottom:1px solid #F4F5F7;">'
+                f'{heading}</div>'
+            )
+        elif stripped == "":
+            flush_para()
+        else:
+            para.append(stripped)
+
+    flush_para()
+
+    # Remove top margin from first heading
+    inner = "".join(html).replace(
+        "margin:1.75rem 0 0.6rem 0;", "margin:0 0 0.6rem 0;", 1
+    )
+
+    st.markdown(
+        f'<div style="background:white;border:1px solid #E1E4E8;'
+        f'border-radius:6px;padding:1.75rem 2rem;">{inner}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1081,7 +1112,7 @@ if page == "Standard Practice":
         Standard Insights
     </div>
     <div class="page-subtitle">
-        Natural language summary of what was learned from all
+        Patterns, interrelationships and key findings from
         {meta.get('source_indents','?')} historical indents.
     </div>
     """, unsafe_allow_html=True)
@@ -1101,10 +1132,7 @@ if page == "Standard Practice":
             st.rerun()
     else:
         insight = st.session_state[insight_key]
-        st.markdown(
-            f'<div class="insight-block">{insight}</div>',
-            unsafe_allow_html=True,
-        )
+        _render_insight(insight)
         st.markdown("<br>", unsafe_allow_html=True)
         c1, c2 = st.columns([1, 5])
         with c1:
@@ -1582,10 +1610,7 @@ elif page == "Analyse New Indent":
                 st.rerun()
         else:
             insight = st.session_state[ikey]
-            st.markdown(
-                f'<div class="insight-block">{insight}</div>',
-                unsafe_allow_html=True,
-            )
+            _render_insight(insight)
             st.markdown("<br>", unsafe_allow_html=True)
             c1, c2, _ = st.columns([1, 1, 4])
             with c1:
