@@ -1,8 +1,13 @@
 """
-frequency_analyzer.py  (v4)
+frequency_analyzer.py  (v5)
 ────────────────────────────
 Reads from:  pipeline_outputs/03_extractions/
 Writes to:   pipeline_outputs/04_frequency/
+
+Changes from v4:
+  - Counts null/missing key fields as common weaknesses
+    (absence of data is a signal, not just presence of bad practices)
+  - Threshold: field missing in >30% of indents → flagged as weakness
 """
 
 from pathlib import Path
@@ -14,6 +19,28 @@ from src.pipeline_paths import PATHS
 
 EXAMPLES_PER_CATEGORY = 1
 MAX_TOTAL_EXAMPLES    = 10
+
+# ── Fields to monitor for null values ────────────────────────────────────────
+# If a field is null in more than NULL_THRESHOLD of indents,
+# it becomes a common weakness in the standard.
+
+NULL_THRESHOLD = 0.30  # 30% of indents
+
+KEY_FIELDS_TO_MONITOR = {
+    "estimated_cost_crores":   "Estimated cost not documented",
+    "scope_of_work":           "Scope of work not clearly defined",
+    "vendor_panel":            "Vendor panel not documented",
+    "hse_plan_available":      "HSE plan status not recorded",
+    "technical_spec_attached": "Technical specification attachment status missing",
+    "boq_surplus_checked":     "BOQ surplus check not recorded",
+    "approval_authority":      "Approval authority not defined",
+    "indent_approval_date":    "Approval date not recorded",
+    "job_risk_category":       "Job risk category not specified",
+    "is_single_party":         "Single party status not documented",
+    "order_required_date":     "Order required date not specified",
+    "term_sheet_type":         "Term sheet type not specified",
+    "contract_period_months":  "Contract period not specified",
+}
 
 
 def _score_indent(data: dict) -> float:
@@ -36,7 +63,10 @@ def _score_indent(data: dict) -> float:
         1 for doc in data.get("documents", [])
         if doc.get("document_structure") is not None
     )
-    return (good_count * 2) + field_bonus + confidence_bonus + structure_bonus - (weak_count * 1.5)
+    return (
+        (good_count * 2) + field_bonus + confidence_bonus +
+        structure_bonus - (weak_count * 1.5)
+    )
 
 
 def _get_procurement_type(data: dict) -> str:
@@ -48,8 +78,8 @@ def _get_procurement_type(data: dict) -> str:
 
 
 def _summarize_indent(data: dict, indent_id: str) -> dict:
-    ps = data.get("procurement_summary", {}) or {}
-    ec = data.get("extraction_confidence", {}) or {}
+    ps  = data.get("procurement_summary", {}) or {}
+    ec  = data.get("extraction_confidence", {}) or {}
     doc_structures = []
     for doc in data.get("documents", []):
         ds = doc.get("document_structure")
@@ -62,7 +92,8 @@ def _summarize_indent(data: dict, indent_id: str) -> dict:
             })
     return {
         "indent_id":             indent_id,
-        "procurement_type":      ps.get("procurement_type") or ps.get("procurment_type"),
+        "procurement_type":      ps.get("procurement_type") or
+                                 ps.get("procurment_type"),
         "package_description":   ps.get("package_description"),
         "scope_of_work":         (ps.get("scope_of_work") or "")[:200],
         "estimated_cost":        ps.get("estimated_cost_crores"),
@@ -86,6 +117,48 @@ def _summarize_indent(data: dict, indent_id: str) -> dict:
         ][:3],
         "recommendations": data.get("recommendations", [])[:3],
     }
+
+
+def _count_null_fields(
+    all_data: list,
+    total_indents: int,
+) -> list:
+    """
+    Count how many indents have null/missing values for key fields.
+    Returns list of weak_item entries for fields missing in many indents.
+
+    This turns absence of data into a signal — if 64% of indents
+    have no estimated cost, the standard should flag this.
+    """
+    null_counts = {field: 0 for field in KEY_FIELDS_TO_MONITOR}
+
+    for data in all_data:
+        ps = data.get("procurement_summary", {}) or {}
+        for field in KEY_FIELDS_TO_MONITOR:
+            val = ps.get(field)
+            if not val or str(val).lower() in (
+                "null", "none", "", "not found", "na"
+            ):
+                null_counts[field] += 1
+
+    null_weaknesses = []
+    for field, count in null_counts.items():
+        if total_indents == 0:
+            continue
+        pct = count / total_indents
+        if pct >= NULL_THRESHOLD:
+            null_weaknesses.append({
+                "issue": (
+                    f"{KEY_FIELDS_TO_MONITOR[field]} "
+                    f"(absent in {count}/{total_indents} indents, "
+                    f"{pct*100:.0f}%)"
+                ),
+                "count": count,
+            })
+
+    # Sort by most missing first
+    null_weaknesses.sort(key=lambda x: -x["count"])
+    return null_weaknesses
 
 
 def analyze_frequencies() -> None:
@@ -119,8 +192,9 @@ def analyze_frequencies() -> None:
     structure_quality_counter: dict = defaultdict(Counter)
     pattern_aggregator: dict = defaultdict(lambda: defaultdict(list))
 
-    total_indents = 0
+    total_indents  = 0
     by_category: dict = defaultdict(list)
+    all_valid_data: list = []  # for null field analysis
 
     for extraction_file in extraction_files:
         try:
@@ -144,6 +218,7 @@ def analyze_frequencies() -> None:
             continue
 
         total_indents += 1
+        all_valid_data.append(data)
 
         for p in data.get("good_practices", []):
             text = p.get("practice", "") if isinstance(p, dict) else str(p)
@@ -220,6 +295,25 @@ def analyze_frequencies() -> None:
                 ],
             })
 
+    # ── Existing weak items from LLM extraction ───────────────────────────────
+    existing_weak = [
+        {"issue": k, "count": v}
+        for k, v in weak_counter.most_common()
+    ]
+
+    # ── Null field weaknesses ─────────────────────────────────────────────────
+    # These are fields missing in many indents — absence of data is a signal
+    null_weak = _count_null_fields(all_valid_data, total_indents)
+
+    if null_weak:
+        print(f"\n  [NULL FIELDS] Found {len(null_weak)} fields missing "
+              f"in >{NULL_THRESHOLD*100:.0f}% of indents:")
+        for nw in null_weak:
+            print(f"    - {nw['issue']}")
+
+    # Merge: LLM-detected weak items first, then null field weaknesses
+    combined_weak = existing_weak + null_weak
+
     report = {
         "total_indents": total_indents,
         "procurement_type_breakdown": [
@@ -234,16 +328,14 @@ def analyze_frequencies() -> None:
             {"practice": k, "count": v}
             for k, v in practice_counter.most_common()
         ],
-        "weak_item_frequency": [
-            {"issue": k, "count": v}
-            for k, v in weak_counter.most_common()
-        ],
+        "weak_item_frequency":        combined_weak,
         "risk_control_frequency": [
             {"control": k, "count": v}
             for k, v in risk_counter.most_common()
         ],
         "structure_quality_frequency":  structure_quality_summary,
         "category_document_patterns":   category_doc_pattern_summary,
+        "null_field_analysis": null_weak,  # separate key for visibility
     }
 
     save_json(report, PATHS.frequency_report)
@@ -252,7 +344,8 @@ def analyze_frequencies() -> None:
     print(f"  Total indents         : {total_indents}")
     print(f"  Procurement types     : {len(procurement_type_counter)}")
     print(f"  Good practices        : {len(practice_counter)}")
-    print(f"  Weak items            : {len(weak_counter)}")
+    print(f"  Weak items (LLM)      : {len(existing_weak)}")
+    print(f"  Weak items (null)     : {len(null_weak)}")
     print(f"  Risk controls         : {len(risk_counter)}")
     print(f"  Document types        : {len(document_type_counter)}")
     print(f"  Structure quality rows: {len(structure_quality_summary)}")
@@ -261,7 +354,9 @@ def analyze_frequencies() -> None:
     # Representative examples
     best_examples  = []
     worst_examples = []
-    for category, indents in sorted(by_category.items(), key=lambda x: -len(x[1])):
+    for category, indents in sorted(
+        by_category.items(), key=lambda x: -len(x[1])
+    ):
         if len(best_examples) >= MAX_TOTAL_EXAMPLES // 2:
             break
         indents_sorted = sorted(indents, key=lambda x: -x[0])
