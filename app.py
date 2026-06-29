@@ -1117,7 +1117,18 @@ if page == "Standard Practice":
     </div>
     """, unsafe_allow_html=True)
 
-    insight_key = f"standard_insight_{domain['key']}"
+    insight_key       = f"standard_insight_{domain['key']}"
+    insight_cache_file = _APP_DIR / "results_cache" / f"{insight_key}.txt"
+
+    # Load from disk cache if not in session state
+    if insight_key not in st.session_state and insight_cache_file.exists():
+        try:
+            st.session_state[insight_key] = insight_cache_file.read_text(
+                encoding="utf-8"
+            )
+        except Exception:
+            pass
+
     if insight_key not in st.session_state:
         if st.button("Generate insights", key=f"gen_std_{domain['key']}"):
             with st.spinner("Generating — this takes 10–15 seconds..."):
@@ -1129,6 +1140,14 @@ if page == "Standard Practice":
                 finally:
                     sys.stdout = old_stdout
                 st.session_state[insight_key] = insight
+                # Save to disk so it persists across restarts
+                try:
+                    insight_cache_file.parent.mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    insight_cache_file.write_text(insight, encoding="utf-8")
+                except Exception:
+                    pass
             st.rerun()
     else:
         insight = st.session_state[insight_key]
@@ -1146,6 +1165,11 @@ if page == "Standard Practice":
         with c2:
             if st.button("Regenerate", key=f"regen_std_{domain['key']}"):
                 del st.session_state[insight_key]
+                # Delete disk cache too
+                try:
+                    insight_cache_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 st.rerun()
 
 
@@ -1263,6 +1287,22 @@ elif page == "Analyse New Indent":
         disabled=not files_ready,
         key=f"analyse_{domain['key']}",
     )
+
+    # Show Start Fresh button only when a report is already displayed
+    if "report" in st.session_state:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button(
+            "Start Fresh — Analyse a Different Indent",
+            key=f"fresh_{domain['key']}",
+        ):
+            for key in ["report", "extraction", "last_indent_id"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            # Clear indent insight too
+            for key in list(st.session_state.keys()):
+                if key.startswith("indent_insight_"):
+                    del st.session_state[key]
+            st.rerun()
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
