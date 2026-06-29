@@ -66,6 +66,59 @@ IMPORTANT RULES:
 - confidence must be one of: High, Medium, Low, Not found.
 
 ════════════════════════════════════════════════════════════
+PROCUREMENT TRACKER FIELD VALIDATION — READ THIS CAREFULLY
+════════════════════════════════════════════════════════════
+
+The Procurement Tracker is a portal-rendered PDF where fields are
+sometimes close together and values can appear in the wrong positions.
+
+When reading Tracker fields, apply these validation rules STRICTLY:
+
+hse_plan_available:
+  - MUST be: Yes / No / NA / Attached / Not Attached / Not Available
+  - If the value looks like a term sheet name, vendor name, or date → set null
+  - Example of WRONG value: "Term Sheet B Class Civil Vendor" → set null
+  - Example of CORRECT value: "Yes" / "Attached" / "NA"
+
+boq_surplus_checked:
+  - MUST be: Yes / No / NA / Checked / Not Checked
+  - If the value looks like a term sheet name, vendor name, or date → set null
+  - Example of WRONG value: "Term Sheet B Class Civil Vendor" → set null
+  - Example of CORRECT value: "Yes" / "No" / "NA"
+
+technical_spec_attached:
+  - MUST be: Yes / No / NA / Attached / a filename
+  - If the value is ONLY a date with no filename → set null
+  - Example of WRONG value: "12-06-2026" (date only, no filename) → set null
+  - Example of CORRECT value: "Attached" / "TS-Drains.pdf" / "Yes"
+
+term_sheet_type:
+  - This is the NAME of the term sheet template used
+  - Example of CORRECT value: "Term Sheet B Class Civil Vendor"
+  - Do NOT put this value into other fields like hse_plan_available
+
+vendor_panel:
+  - MUST be vendor names or vendor codes from the Proposed Vendor Panel section
+  - If you see "Term Sheet B Class Civil Vendor" in this field → it is wrong
+    that value belongs in term_sheet_type, not vendor_panel → set vendor_panel null
+  - CORRECT vendor_panel looks like: "ABC Ltd, XYZ Pvt Ltd" or vendor codes
+
+estimated_cost_crores:
+  - MUST be a numeric value (digits, decimals, commas are OK)
+  - If the value has NO digits → set null
+  - A person's name or any non-numeric value → set null
+  - Example of WRONG value: "Mayank Shekhar" → set null
+  - Example of CORRECT value: "0.1388" / "1.25" / "Rs 13.88 Lakhs"
+
+is_single_party:
+  - MUST be: Yes / No / NA
+  - Anything else → set null
+
+approval_authority and procurement_head:
+  - These SHOULD be person names — that is correct
+  - Examples: "Sajit Ahemad", "Rajendra Kumar" are CORRECT here
+
+════════════════════════════════════════════════════════════
 PART 1: DOCUMENT STRUCTURE ANALYSIS RULES
 ════════════════════════════════════════════════════════════
 
@@ -603,18 +656,10 @@ Return this exact JSON structure:
         }
     ],
     "recommended_practices": [
-        {
-            "practice": "",
-            "source_frequency": 0,
-            "reason": ""
-        }
+        {"practice": "", "source_frequency": 0, "reason": ""}
     ],
     "optional_practices": [
-        {
-            "practice": "",
-            "source_frequency": 0,
-            "reason": ""
-        }
+        {"practice": "", "source_frequency": 0, "reason": ""}
     ],
     "common_good_practices": [
         {
@@ -634,19 +679,10 @@ Return this exact JSON structure:
         }
     ],
     "risk_controls": [
-        {
-            "risk_area": "",
-            "control": "",
-            "source_frequency": 0,
-            "reason": ""
-        }
+        {"risk_area": "", "control": "", "source_frequency": 0, "reason": ""}
     ],
     "documentation_requirements": [
-        {
-            "requirement": "",
-            "source_frequency": 0,
-            "reason": ""
-        }
+        {"requirement": "", "source_frequency": 0, "reason": ""}
     ],
     "document_structure_standards": [
         {
@@ -658,18 +694,10 @@ Return this exact JSON structure:
         }
     ],
     "vendor_requirements": [
-        {
-            "requirement": "",
-            "source_frequency": 0,
-            "reason": ""
-        }
+        {"requirement": "", "source_frequency": 0, "reason": ""}
     ],
     "approval_requirements": [
-        {
-            "requirement": "",
-            "source_frequency": 0,
-            "reason": ""
-        }
+        {"requirement": "", "source_frequency": 0, "reason": ""}
     ],
     "category_specific_patterns": [
         {
@@ -682,18 +710,17 @@ Return this exact JSON structure:
 }
 
 GENERATION RULES:
-- mandatory_practices: 8-12 items — practices in majority of indents
-- recommended_practices: 8-12 items — practices that improve quality
-- optional_practices: 4-6 items — nice to have
-- common_good_practices: 8-12 items — most frequent good practices
-- common_weak_practices: 10-15 items — most frequent weaknesses with fixes
-- risk_controls: 8-12 items — one per major risk area
-- documentation_requirements: 6-8 items — required document types
+- mandatory_practices: 8-12 items
+- recommended_practices: 8-12 items
+- optional_practices: 4-6 items
+- common_good_practices: 8-12 items
+- common_weak_practices: 10-15 items with fixes
+- risk_controls: 8-12 items
+- documentation_requirements: 6-8 items
 - document_structure_standards: one entry per document_type × category combo
 - vendor_requirements: 4-6 items
 - approval_requirements: 4-6 items
 - category_specific_patterns: one per procurement_type × document_type combo
-  from category_document_patterns — include ALL combinations found
 
 Classification:
 - MANDATORY: appears in >50% of indents OR critical for compliance
@@ -704,11 +731,11 @@ You will receive:
 - total_indents
 - procurement_type_breakdown
 - document_type_frequency
-- good_practice_frequency (use ALL of these)
-- weak_item_frequency (use ALL of these)
+- good_practice_frequency
+- weak_item_frequency
 - risk_control_frequency
 - structure_quality_frequency
-- category_document_patterns (generate one pattern entry per combination)
-- representative_best_examples (use for context and specific examples)
-- representative_worst_examples (use for common_weak_practices)
+- category_document_patterns
+- representative_best_examples
+- representative_worst_examples
 """
