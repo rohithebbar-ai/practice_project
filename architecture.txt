@@ -1,0 +1,100 @@
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 1 — USER ACTION                                         │
+│ User is in IPMS filling an indent.                          │
+│ They've selected options (which unlocked certain fields)    │
+│ and uploaded some attachments.                              │
+│ They click "Check Adequacy".                                │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 2 — IPMS CALLS YOUR API (async)                        │
+│ POST /check-adequacy                                        │
+│ Body: { indent_id, domain }                                │
+│ Your API immediately returns:                              │
+│   { analysis_id, status: "processing" }                    │
+│ IPMS shows "Analysis in progress..."                       │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 3 — YOUR API FETCHES DATA (in background)             │
+│                                                             │
+│ 3a. Fetch tracker fields from Pranay's API                 │
+│     GET ipms/indent/{id}/fields                            │
+│     → returns: [{question, answer}, ...]                   │
+│       e.g. {"Type of Indent": "Service",                   │
+│             "Order Reqd Date": "31-12-2025"}               │
+│     → already clean, only filled fields                    │
+│                                                             │
+│ 3b. Fetch attachments from SharePoint (parallel)          │
+│     → BOQ.xlsx, TechSpec.pdf, etc.                         │
+│     → only the documents this indent actually has         │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 4 — PROCESS                                           │
+│                                                             │
+│ 4a. Tracker fields → NO parsing needed (already clean)    │
+│     → map question-answer pairs to internal concepts      │
+│                                                             │
+│ 4b. Documents → parse + clean                             │
+│     → Excel (pandas), PDF (PyMuPDF), DOCX (python-docx)   │
+│                                                             │
+│ 4c. Verify each document is genuine                       │
+│     → is the "BOQ" actually a BOQ?                         │
+│     → is the "term sheet" actually a term sheet?          │
+│     → flag fake/wrong attachments                         │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 5 — ANALYSE WITH LLM                                  │
+│ Send to LLM:                                               │
+│   - tracker fields (what user selected/filled)            │
+│   - cleaned document content (BOQ, specs)                 │
+│   - the standard for THIS domain (from memory)            │
+│ LLM produces:                                             │
+│   - extraction + interrelationship analysis               │
+│   - what's missing GIVEN what was unlocked                │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 6 — COMPARE & SCORE                                   │
+│ Compare against in-memory standard for this domain        │
+│ Calculate:                                                │
+│   - overall score                                         │
+│   - findings (confirmed / missing / partial)              │
+│   - recommendations                                       │
+│   - missing documents (given what was required)           │
+│   - interrelationship issues (Tracker vs BOQ etc.)        │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 7 — RETURN RESPONSE TO IPMS                          │
+│ Your API returns JSON:                                    │
+│   { indent_id, analysis_timestamp,                        │
+│     score, grade,                                         │
+│     findings: [...],                                      │
+│     recommendations: [...],                               │
+│     missing_documents: [...],                             │
+│     interrelationship_issues: [...] }                     │
+│                                                           │
+│ You DO NOT write to DB.                                   │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 8 — PRANAY POPULATES DB                              │
+│ Pranay receives your response.                            │
+│ Writes to IPMS DB:                                        │
+│   indent_id, analysis_timestamp, score, full analysis     │
+│ Handles versioning + history.                             │
+│ Always displays the LATEST score.                         │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 9 — USER SEES RESULT                                 │
+│ Score + findings shown in IPMS.                           │
+│ User can:                                                 │
+│   - improve attachments / fill fields                     │
+│   - click "Check Adequacy" again → new analysis           │
+│   - submit when satisfied                                 │
+│ Manager later sees only the latest score.                │
+└─────────────────────────────────────────────────────────────┘
