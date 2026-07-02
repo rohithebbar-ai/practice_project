@@ -10,7 +10,8 @@ in the architecture doc:
     -> { analysis_id, status: "processing" }   (returned immediately)
 
 This is a STARTING skeleton, not a finished service — it shows the
-shape Cloud Run expects and where your existing modules plug in. 
+shape Cloud Run expects and where your existing modules plug in. You
+will need to fill in:
   - _fetch_fields_from_ipms()      (real IPMS Field API client, once
                                      Pranay exposes it — for now this
                                      can call simulate_ipms_fields.py)
@@ -154,7 +155,9 @@ def check_adequacy(req: CheckAdequacyRequest):
         # classified_docs = DocumentAnalyzer().classify_rule_based(...)
 
         # 4. Infer requirements (NEW component you already have)
-        inference = infer_requirements(mapping)
+        #    domain-aware: civil vs electromech get different
+        #    domain-specific rules on top of the shared universal ones
+        inference = infer_requirements(mapping, domain=domain)
 
         # 5. Analyse via GENAI API (existing)
         # extraction = DocumentAnalyzer().extract_indent(...)
