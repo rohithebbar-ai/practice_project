@@ -1,32 +1,39 @@
 """
 requirement_inference.py
 ──────────────────────────
-NEW component for Iteration 1 (Indent Validation Service).
 
 Purpose
 -------
-Two distinct kinds of "gap" need to be detected, per the confirmed
-production flow (step 6):
+Two distinct kinds of "gap" are detected, per the confirmed production
+flow (step 6):
 
   1. Direct gaps — a field is marked `required=true` by IPMS but its
-     value is blank. This is a simple pass-through check on the mapped
-     fields.
+     value is blank. This alone covers most of what you'd otherwise
+     write a bespoke rule for (e.g. "Technical Specification is
+     missing" or "Class A Vendor is unanswered") — IPMS already tells
+     us these are mandatory, so no extra logic is needed.
 
   2. Inferred gaps — a field VALUE implies that some OTHER field or
-     document should be present, even if IPMS didn't mark that other
-     field required=true. E.g.:
-       - job_risk_category = High  → HSE plan / safety document expected
-       - is_single_party   = Yes   → single-party justification expected
-       - estimated_cost_crores > threshold → CR (cost reasonability)
-         stage expected to be exercised, not silently skipped
-       - discipline = Civil        → Soil Report expected (civil-only
-         doc slot observed directly in the IPMS Documents Upload
-         section: "Soil Report (for Civil Only)")
+     document should be present, even though IPMS itself doesn't mark
+     that other field required. This is the genuinely new logic, and
+     it's expressed as DATA (INFERENCE_RULES below), not as one Python
+     function per rule. Examples:
+       - job_risk_category = High  → HSE plan expected
+       - discipline = Civil        → Soil Report expected
+       - discipline = Electromech  → Electrical safety cert expected
 
-Per Dhiraj's direction (confirmed earlier): this is intentionally basic
-for Iteration 1 — required-flag gaps plus a handful of hand-written
-field→doc rules, NOT an exhaustive rule engine. Deeper inference is
-deferred to Iteration 2.
+Why a rule TABLE instead of rule FUNCTIONS
+-------------------------------------------
+Every one of these rules has the same shape: "IF <trigger field> has
+<one of these values> THEN <expected field> should not be blank."
+Writing a new `_rule_xxx()` function for every domain/document
+combination doesn't scale — a dozen domains with a few document types
+each would mean a few dozen near-identical functions. Instead,
+INFERENCE_RULES is a list of RuleSpec entries; adding a new domain
+requirement is adding one entry to that list, not writing new code.
+If this list grows large enough to be awkward to edit inline, it can
+be moved to a JSON/YAML file and loaded at startup — the engine
+(`_evaluate_rule`) doesn't care where the specs come from.
 
 This module consumes the output of field_mapper.py (a MappingResult),
 so it only ever sees canonical field names — it has no knowledge of
@@ -38,19 +45,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from field_mapper import MappingResult, MappedField
 
-
-def _val(result: MappingResult, name: str) -> Optional[str]:
+def _val(result, name: str) -> Optional[str]:
     mf = result.mapped.get(name)
     if mf is None:
         return None
     v = mf.value
     return str(v).strip() if v is not None else None
-
-
-def _is_yes(value: Optional[str]) -> bool:
-    return bool(value) and value.strip().lower() in ("yes", "y", "true")
 
 
 def _is_blank(value: Optional[str]) -> bool:
@@ -90,146 +91,151 @@ class InferenceResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Rule definitions
+# Rule table — DATA, not code. Add a dict here to add a rule.
 # ─────────────────────────────────────────────────────────────────────────
-# Each rule is a plain function(result) -> Optional[Gap] so new rules can
-# be added independently without touching a giant if/elif block. Keep
-# this list short and hand-written per Dhiraj's Iteration-1 scope.
-
-def _rule_hse_plan_for_high_risk(result: MappingResult) -> Optional[Gap]:
-    risk = _val(result, "job_risk_category")
-    hse  = _val(result, "hse_plan_available")
-    if risk and risk.strip().lower() == "high" and _is_blank(hse):
-        return Gap(
-            kind="inferred",
-            field_or_doc="hse_plan_available",
-            reason=(
-                "job_risk_category is High but hse_plan_available is "
-                "blank/NA — a High-risk job normally expects an HSE "
-                "plan document."
-            ),
-            severity="high",
-        )
-    if risk and risk.strip().lower() == "high" and hse and \
-            hse.strip().lower() == "na":
-        return Gap(
-            kind="inferred",
-            field_or_doc="hse_plan_available",
-            reason=(
-                "job_risk_category is High but hse_plan_available is "
-                "explicitly marked NA — worth flagging for user "
-                "confirmation rather than auto-accepting."
-            ),
-            severity="medium",
-        )
-    return None
-
-
-def _rule_single_party_justification(result: MappingResult) -> Optional[Gap]:
-    single_party = _val(result, "is_single_party")
-    remarks      = _val(result, "package_description")  # closest proxy
-    if _is_yes(single_party):
-        return Gap(
-            kind="inferred",
-            field_or_doc="single_party_justification",
-            reason=(
-                "is_single_party is Yes — a single-party procurement "
-                "normally requires an explicit justification, which "
-                "is not a dedicated IPMS field. Check remarks/background "
-                "text for a justification before flagging as missing."
-            ),
-            severity="medium",
-        )
-    return None
-
-
-def _rule_soil_report_for_civil(result: MappingResult) -> Optional[Gap]:
-    discipline = _val(result, "discipline")
-    soil       = _val(result, "soil_report_file")
-    if discipline and discipline.strip().lower() == "civil" and \
-            _is_blank(soil):
-        return Gap(
-            kind="inferred",
-            field_or_doc="soil_report_file",
-            reason=(
-                "discipline is Civil — IPMS's own Documents Upload "
-                "section labels this slot 'Soil Report (for Civil "
-                "Only)', implying it is expected for civil work, but "
-                "no file was found in the mapped fields."
-            ),
-            severity="medium",
-        )
-    return None
-
-
-def _rule_technical_spec_present(result: MappingResult) -> Optional[Gap]:
-    tech_spec = _val(result, "technical_spec_attached")
-    if _is_blank(tech_spec):
-        return Gap(
-            kind="direct",
-            field_or_doc="technical_spec_attached",
-            reason="Technical Specification field/file is blank.",
-            severity="high",
-        )
-    return None
-
-
-def _rule_cost_estimate_present(result: MappingResult) -> Optional[Gap]:
-    cost_file = _val(result, "cost_estimate_file")
-    if _is_blank(cost_file):
-        return Gap(
-            kind="direct",
-            field_or_doc="cost_estimate_file",
-            reason="Cost Estimate file is blank.",
-            severity="high",
-        )
-    return None
-
-
-def _rule_class_a_vendor_unanswered(result: MappingResult) -> Optional[Gap]:
-    # Observed directly in a real screenshot: "Class A Vendor?" left
-    # with both Yes/No boxes unchecked despite being marked mandatory (*).
-    mf = result.mapped.get("class_a_vendor")
-    if mf is not None and mf.required and _is_blank(str(mf.value)):
-        return Gap(
-            kind="direct",
-            field_or_doc="class_a_vendor",
-            reason=(
-                "Class A Vendor is marked required by IPMS but neither "
-                "Yes nor No is answered."
-            ),
-            severity="medium",
-        )
-    return None
-
-
-DEFAULT_RULES = [
-    _rule_hse_plan_for_high_risk,
-    _rule_single_party_justification,
-    _rule_soil_report_for_civil,
-    _rule_technical_spec_present,
-    _rule_cost_estimate_present,
-    _rule_class_a_vendor_unanswered,
+#
+# Fields:
+#   trigger_field    canonical field name whose value gates this rule
+#   trigger_values   list of acceptable values (case-insensitive match)
+#   expected_field   canonical field that must NOT be blank once the
+#                     trigger fires; use None for rules that should
+#                     always flag for review when triggered (no
+#                     specific field to check, e.g. "needs a written
+#                     justification somewhere, not a dedicated field")
+#   domains          list of domain strings this rule applies to;
+#                     None = universal (applies to every domain)
+#   reason           human-readable explanation shown in the gap;
+#                     {trigger_field}/{trigger_value}/{expected_field}
+#                     are available as format placeholders
+#   severity         "low" | "medium" | "high"
+#
+INFERENCE_RULES: list[dict] = [
+    {
+        "trigger_field": "job_risk_category",
+        "trigger_values": ["high"],
+        "expected_field": "hse_plan_available",
+        "domains": None,
+        "reason": (
+            "{trigger_field} is High but {expected_field} is blank/NA "
+            "— a High-risk job normally expects an HSE plan document."
+        ),
+        "severity": "high",
+    },
+    {
+        "trigger_field": "is_single_party",
+        "trigger_values": ["yes", "y", "true"],
+        "expected_field": None,
+        "domains": None,
+        "reason": (
+            "{trigger_field} is Yes — a single-party procurement "
+            "normally requires an explicit justification, which is "
+            "not a dedicated IPMS field. Check remarks/background text "
+            "before flagging as missing."
+        ),
+        "severity": "medium",
+    },
+    {
+        "trigger_field": "discipline",
+        "trigger_values": ["civil"],
+        "expected_field": "soil_report_file",
+        "domains": ["civil"],
+        "reason": (
+            "discipline is Civil — IPMS's own Documents Upload section "
+            "labels this slot 'Soil Report (for Civil Only)', implying "
+            "it is expected for civil work, but no file was found."
+        ),
+        "severity": "medium",
+    },
+    {
+        # Placeholder — confirm the real electromech document slot name
+        # from an actual electromech screenshot (the same way
+        # soil_report_file was confirmed from civil screenshots) before
+        # relying on this in production.
+        "trigger_field": "discipline",
+        "trigger_values": [
+            "electromech", "electromechanical", "e&i", "electrical",
+        ],
+        "expected_field": "electrical_safety_cert_file",
+        "domains": ["electromech"],
+        "reason": (
+            "discipline is Electromechanical — an electrical safety "
+            "certificate is expected for this class of work, but no "
+            "file was found. UNVERIFIED: confirm the real IPMS field "
+            "name for this slot."
+        ),
+        "severity": "medium",
+    },
 ]
 
 
+def _evaluate_rule(rule: dict, mapping_result) -> Optional[Gap]:
+    trigger_value = _val(mapping_result, rule["trigger_field"])
+    if trigger_value is None:
+        return None
+
+    trigger_values = rule.get("trigger_values")
+    if trigger_values is not None and \
+            trigger_value.strip().lower() not in trigger_values:
+        return None
+
+    expected_field = rule.get("expected_field")
+    if expected_field is not None:
+        expected_value = _val(mapping_result, expected_field)
+        if not _is_blank(expected_value):
+            return None  # expected field is present — no gap
+
+    reason = rule["reason"].format(
+        trigger_field=rule["trigger_field"],
+        trigger_value=trigger_value,
+        expected_field=expected_field or "",
+    )
+
+    return Gap(
+        kind="inferred",
+        field_or_doc=expected_field or f"{rule['trigger_field']}_followup",
+        reason=reason,
+        severity=rule.get("severity", "medium"),
+    )
+
+
+def _rules_for_domain(domain: Optional[str]) -> list[dict]:
+    domain_norm = domain.strip().lower() if domain else None
+    return [
+        r for r in INFERENCE_RULES
+        if r["domains"] is None
+        or (domain_norm is not None and domain_norm in r["domains"])
+    ]
+
+
 def infer_requirements(
-    mapping_result: MappingResult,
-    rules: Optional[list] = None,
+    mapping_result,
+    domain: Optional[str] = None,
+    rules: Optional[list[dict]] = None,
 ) -> InferenceResult:
     """
-    Runs direct required-flag gap detection plus the hand-written
-    field-value-based inference rules over a FieldMapper output.
+    Runs direct required-flag gap detection plus the declarative
+    value-triggered rules in INFERENCE_RULES over a FieldMapper output.
+
+    domain: "civil" | "electromech" | ... — selects which domain-scoped
+            rules (in addition to universal ones) get evaluated. Pass
+            the same domain string used to pick the matching standard
+            in main.py, so gap detection and scoring stay consistent
+            for the same indent.
+    rules:  override the rule set entirely (mainly for testing); if
+            omitted, rules are resolved from `domain` via
+            `_rules_for_domain`.
     """
-    rules = rules if rules is not None else DEFAULT_RULES
+    active_rules = rules if rules is not None else _rules_for_domain(domain)
     out = InferenceResult()
 
-    # 1. Direct gaps — required=true fields with blank values, across
-    #    ALL mapped fields, not just the ones covered by hand-written
-    #    rules above.
+    # 1. Direct gaps — required=true fields with blank values. This
+    #    alone covers "Technical Specification missing", "Class A
+    #    Vendor unanswered", "Cost Estimate missing", etc. — anything
+    #    IPMS itself marks mandatory needs no separate rule.
     for name, mf in mapping_result.mapped.items():
-        if mf.required and _is_blank(str(mf.value) if mf.value is not None
-                                      else None):
+        if mf.required and _is_blank(
+            str(mf.value) if mf.value is not None else None
+        ):
             out.gaps.append(Gap(
                 kind="direct",
                 field_or_doc=name,
@@ -240,18 +246,16 @@ def infer_requirements(
                 severity="high",
             ))
 
-    # 2. Inferred gaps — hand-written rules
-    for rule in rules:
-        gap = rule(mapping_result)
+    # 2. Inferred gaps — declarative rule table
+    for rule in active_rules:
+        gap = _evaluate_rule(rule, mapping_result)
         if gap is not None:
             out.gaps.append(gap)
 
-    # De-duplicate: a field can legitimately be caught by both the
-    # generic required-flag loop and a specific hand-written rule
-    # (e.g. class_a_vendor, technical_spec_attached). Keep the first
-    # occurrence per (kind, field_or_doc) — direct gaps are added
-    # before inferred ones, so a generic direct-gap duplicate of a
-    # specific direct-rule gap collapses to one entry.
+    # De-duplicate on (kind, field_or_doc) — an inferred gap can name
+    # the same field a direct gap already caught (e.g. hse_plan_available
+    # marked required AND blank, plus the high-risk rule also firing on
+    # it). Keep the first occurrence; direct gaps are added first.
     seen = set()
     deduped = []
     for g in out.gaps:
@@ -284,7 +288,12 @@ if __name__ == "__main__":
 
     mapper = FieldMapper()
     mapping = mapper.map_fields(sample_fields)
-    inference = infer_requirements(mapping)
 
+    print("=== domain=civil ===")
+    inference = infer_requirements(mapping, domain="civil")
     import json
     print(json.dumps(inference.summary(), indent=2))
+
+    print("\n=== domain=electromech ===")
+    inference2 = infer_requirements(mapping, domain="electromech")
+    print(json.dumps(inference2.summary(), indent=2))
