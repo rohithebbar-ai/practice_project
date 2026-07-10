@@ -1,10 +1,5 @@
-HOW THE OFFLINE STANDARD AND LIVE COMPARISON WORK
+Indent comparision working code
 ====================================================
-
-This note explains, in plain language, the two separate processes in the
-pipeline: building the best-practice standard, and scoring a new indent
-against it. It also lists exactly which files run at each stage.
-
 
 THE TWO PROCESSES ARE COMPLETELY SEPARATE
 ------------------------------------------
@@ -77,6 +72,90 @@ When to re-run Process A: when enough new indents have been processed
 has passed (for example 30 days), whichever happens first. Process A is
 not re-run after every single new indent - that would be wasteful, and a
 single unusual indent could distort the standard.
+
+
+HOW TO ACTUALLY RUN PROCESS A TODAY (CURRENT MVP)
+----------------------------------------------------
+
+This is the practical, step-by-step version of Process A as it exists
+right now, with the exact files to run in order.
+
+Before running anything:
+  Decide whether you are rebuilding from scratch (all indents re-parsed
+  and re-extracted) or only adding newly arrived indents on top of what
+  is already there. If you are only adding new indents, you do not need
+  to delete anything - just drop the new raw files into the raw data
+  folder and continue from Step 1 below; already-parsed and
+  already-extracted indents are skipped automatically.
+
+  If you specifically want to force a full rebuild because logic has
+  changed (for example the extractor or prompts were fixed), clear the
+  extraction and cache folders first:
+    - clear the extractions folder
+    - clear the results cache folder
+  Do not clear the parsed folder or the cleaned folder - parsing does
+  not need to be redone unless the source files themselves changed.
+
+Step 1 - Run the parser
+  Command: run pipeline_parse.py
+  What it does: reads every raw document and produces plain text per
+  document, saved into the parsed output folder.
+  Skip this step entirely if you are only re-running extraction or
+  standard generation on already-parsed indents.
+
+Step 2 - Run the extractor
+  Command: run pipeline_analyze.py
+  What it does: reads the parsed text, classifies every document,
+  extracts structured fields using the LLM, validates every field, and
+  writes one extraction file per indent.
+  This step will automatically skip any indent that already has an
+  extraction file, so it is safe to re-run after adding new raw
+  documents - only the new ones will be processed.
+  This is the slowest step, since it makes one LLM call per indent.
+
+Step 2b - Check for anything that failed to extract (optional but
+recommended)
+  Command: run diagnose_missing.py
+  What it does: compares the parsed folder against the extractions
+  folder and lists any indent that was parsed but has no extraction,
+  along with a likely reason (empty documents, oversized documents, or
+  an unknown failure).
+  If anything is missing:
+    Command: run rerun_missing.py
+    What it does: retries extraction only for the indents that are
+    missing, without re-processing everything else.
+
+Step 3 - Run the frequency analyser
+  Command: run frequency_analyzer.py (or the combined script that runs
+  steps 3 and 4 together, if one exists in the project)
+  What it does: reads every extraction file and counts patterns across
+  all of them - how often each practice appears, which fields are
+  commonly blank, and so on.
+
+Step 4 - Generate the standard
+  Command: run standard_practice_generator.py (or the same combined
+  script as above)
+  What it does: reads the frequency counts and uses one LLM call to
+  produce the final standard document.
+
+Step 5 - Confirm the result
+  Check that the standard document now exists in the standard output
+  folder, with an updated timestamp.
+  Optionally run evaluate_extraction.py to see a quality report of the
+  extractions that fed into this standard - this is useful to confirm
+  nothing broke before trusting the new standard.
+
+Summary of files to run, in order, for a normal refresh:
+  1. pipeline_parse.py            (skip if nothing new to parse)
+  2. pipeline_analyze.py
+  3. diagnose_missing.py          (check only)
+  4. rerun_missing.py             (only if step 3 found anything missing)
+  5. frequency_analyzer.py
+  6. standard_practice_generator.py
+  7. evaluate_extraction.py       (optional quality check)
+
+If the project has a single combined script that runs steps 3 and 4
+together, use that instead of running the two files separately.
 
 
 PROCESS B - SCORING A NEW INDENT (LIVE, PER REQUEST)
