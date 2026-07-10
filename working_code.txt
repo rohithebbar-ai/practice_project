@@ -1,0 +1,182 @@
+HOW THE OFFLINE STANDARD AND LIVE COMPARISON WORK
+====================================================
+
+This note explains, in plain language, the two separate processes in the
+pipeline: building the best-practice standard, and scoring a new indent
+against it. It also lists exactly which files run at each stage.
+
+
+THE TWO PROCESSES ARE COMPLETELY SEPARATE
+------------------------------------------
+
+Process A - Build the standard (offline, periodic)
+  Runs on a schedule. Reads MANY historical indents.
+  Produces ONE standard document.
+  This happens rarely - maybe monthly.
+
+Process B - Score a new indent (live, per request)
+  Runs every time someone checks one indent.
+  Reads the standard (already built) plus ONE new indent.
+  Produces one score and one analysis.
+  This happens constantly, every time "Check Adequacy" is clicked.
+
+Process A feeds Process B. Process B never rebuilds the standard - it
+only reads it.
+
+
+PROCESS A - BUILDING THE BEST-PRACTICE STANDARD (OFFLINE)
+-----------------------------------------------------------
+
+When this runs: periodically, after enough new indents accumulate, or on
+a fixed schedule such as monthly or fortnightly.
+
+What it needs: all the historical indents already extracted - currently
+the full set in the MVP dataset.
+
+The steps, in order:
+
+Step 1 - Parsing
+  Reads the raw indent documents (PDFs, Excel files, Word documents) from
+  the raw data folder.
+  Produces plain text for each document.
+  Purpose: get clean, readable text out of messy source files.
+
+Step 2 - Analysis and extraction
+  Reads the parsed text from Step 1.
+  Classifies each document by what it actually contains, and extracts
+  structured fields, good practices, and weak practices using the LLM.
+  Every extracted field is validated before being kept.
+  Produces one structured extraction record per indent.
+  Purpose: turn each indent's raw documents into structured data. This is
+  the expensive step - one LLM call per indent.
+
+Step 3 - Frequency analysis
+  Reads every extraction record produced in Step 2, across all indents
+  together.
+  Counts how often each practice appears, which fields are commonly
+  missing, and what percentage of indents follow each pattern.
+  Purpose: find patterns ACROSS all indents, not within a single one. For
+  example: what fraction of indents have a safety plan attached, or how
+  often the cost estimate is left blank.
+
+Step 4 - Standard generation
+  Reads the frequency counts from Step 3.
+  Uses one LLM call to turn the raw counts into readable, organised
+  practices.
+  Produces the final standard document, containing mandatory practices,
+  recommended practices, risk controls, document structure expectations,
+  and category-specific patterns.
+  Purpose: turn frequency numbers into an actual usable standard that
+  describes what "good" looks like.
+
+End result of Process A: one standard document containing everything
+learned from all historical indents.
+
+When to re-run Process A: when enough new indents have been processed
+(for example quality-passed 15 new indents) or when a set number of days
+has passed (for example 30 days), whichever happens first. Process A is
+not re-run after every single new indent - that would be wasteful, and a
+single unusual indent could distort the standard.
+
+
+PROCESS B - SCORING A NEW INDENT (LIVE, PER REQUEST)
+-------------------------------------------------------
+
+When this runs: every time a user checks one specific indent for
+adequacy.
+
+What it needs:
+  1. The standard produced by Process A (already built and available).
+  2. The one new indent being checked.
+
+The steps, in order:
+
+Step 1 - Get the new indent's data
+  In the current MVP: the same parsing and extraction steps used in
+  Process A are applied to this one new indent.
+  In production: field data arrives already clean from the source
+  system, so no parsing is needed for fields; only document attachments
+  such as the BOQ or technical specification still need to be parsed and
+  classified.
+
+Step 2 - Load the standard
+  The standard document from Process A is loaded once and kept ready for
+  comparison. It is not re-read from storage on every single request -
+  this is what keeps comparison fast.
+
+Step 3 - Comparison
+  Reads the new indent's extraction from Step 1 and the standard already
+  loaded in Step 2.
+  Produces the comparison result directly - score, grade, findings, and
+  gaps - without needing to write anything to storage first.
+  Purpose: check the one new indent against what the standard says good
+  indents look like. This is where points for mandatory practices,
+  recommended practices, documentation, and risk coverage are calculated.
+
+Step 4 - Insight generation
+  Reads the new indent's extraction, the comparison result from Step 3,
+  and the standard.
+  Uses one LLM call to produce a narrative explanation.
+  Purpose: turn the raw score into a readable explanation - why the
+  indent scored what it did, and what specifically to fix.
+
+End result of Process B: one score and one detailed analysis for one
+indent, returned to whoever requested it.
+
+Process B runs constantly - every check, and every re-check after a user
+improves their indent. It never touches the frequency counts or rebuilds
+anything. It only reads the standard that Process A already produced.
+
+
+SIDE BY SIDE SUMMARY
+----------------------
+
+Trigger:
+  Process A - scheduled (monthly or every fortnight)
+  Process B - every single "Check Adequacy" click
+
+Input:
+  Process A - all historical indents
+  Process B - the standard plus one new indent
+
+LLM calls:
+  Process A - one call per indent for extraction, plus one call for
+              synthesising the standard
+  Process B - one call per new indent for extraction, plus one call for
+              the insight narrative
+
+Output:
+  Process A - the best-practice standard document
+  Process B - a score and findings, returned to the caller, not rebuilt
+              or stored by this process itself
+
+Typical duration:
+  Process A - minutes to hours, depending on how many indents are
+              included
+  Process B - roughly fifteen to twenty-five seconds per check
+
+Where the result goes:
+  Process A - the standard document, later read by Process B
+  Process B - returned to the interface the user is working in, which is
+              responsible for saving and displaying it
+
+
+THE ONE DOCUMENT BOTH PROCESSES SHARE
+----------------------------------------
+
+The best-practice standard document is the single link between the two
+processes.
+
+Process A writes this document - it rebuilds it periodically.
+Process B reads this document - it loads it and compares new indents
+against it.
+
+Process B never writes to this document.
+Process A never looks at any single "new" indent that is being checked
+live.
+
+This separation is what makes the design practical: the expensive,
+all-indents work in Process A happens rarely and offline. The per-request
+work in Process B is fast, because it is only reading a pre-built
+standard and comparing one indent against it - no re-analysis of history
+is needed on every check.
