@@ -1,3 +1,32 @@
+cd ~/ipms-indent-validation
+
+gcloud secrets create genai-key \
+  --project=tsl-generative-ai \
+  --replication-policy="automatic" \
+  --data-file="secrets/svc-genai-api-dev-oneit.json"
+
+
+gcloud secrets add-iam-policy-binding genai-key \
+  --project=tsl-generative-ai \
+  --member="serviceAccount:svc-ipms-indent-validation@tsl-generative-ai.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+
+
+gcloud run deploy ipms-indent-validation \
+  --project=tsl-generative-ai \
+  --region=asia-south1 \
+  --source=. \
+  --service-account=svc-ipms-indent-validation@tsl-generative-ai.iam.gserviceaccount.com \
+  --set-secrets="/secrets/genai-key.json=genai-key:latest" \
+  --set-env-vars="GENAI_SERVICE_ACCOUNT=/secrets/genai-key.json,GENAI_AUTH_URL=<your_auth_url>,GENAI_API_URL=<your_api_url>,GENAI_API_KEY=<your_api_key>,GENAI_ADID=<your_adid>,GENAI_MODEL=gpt-4o-mini" \
+  --allow-unauthenticated \
+  --memory=1Gi \
+  --timeout=300
+
+
+
+
+
 """
 diagnose_missing.py
 ────────────────────
