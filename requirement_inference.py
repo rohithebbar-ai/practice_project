@@ -1,6 +1,7 @@
 """
 requirement_inference.py
 ──────────────────────────
+NEW component for Iteration 1 (Indent Validation Service).
 
 Purpose
 -------
@@ -34,6 +35,10 @@ requirement is adding one entry to that list, not writing new code.
 If this list grows large enough to be awkward to edit inline, it can
 be moved to a JSON/YAML file and loaded at startup — the engine
 (`_evaluate_rule`) doesn't care where the specs come from.
+
+Iteration 1 is intentionally basic — required-flag gaps plus a
+handful of value-triggered rules, not an exhaustive rule engine.
+Deeper inference is deferred to a later iteration.
 
 This module consumes the output of field_mapper.py (a MappingResult),
 so it only ever sees canonical field names — it has no knowledge of
