@@ -1,9 +1,10 @@
 """
 ins_field_mapper.py
 ──────────────────────
-Replaces field_mapper.py's fuzzy-matching approach for the REAL
-IPMS contract confirmed directly from Pranay's document (the one with
-actual DB column names: INS_NO, INS_LOC_CD, INS_HSE, etc.).
+Replaces field_mapper.py's fuzzy-matching approach with a direct
+dictionary lookup for the confirmed IPMS contract, which uses fixed
+database column names (INS_NO, INS_LOC_CD, INS_HSE, etc.) rather than
+free-text UI labels.
 
 Why this replaces fuzzy matching, not extends it:
 --------------------------------------------------
@@ -13,20 +14,21 @@ labels ("Job Risk Category", "HSE plan document specific to this
 package...") that could vary in wording between indents. That's a
 real problem worth fuzzy-matching.
 
-Pranay's confirmed contract is different: the POST /check-adequacy
-body contains the full set of INS_* fields directly, as fixed,
-stable JSON keys HE controls. There's no free-text label to fuzzy
-match against — "INS_HSE" is always spelled "INS_HSE". A direct
-dictionary lookup is the correct tool here, not a similarity engine.
+The confirmed contract is different: the POST /check-adequacy body
+contains the full set of INS_* fields directly, as fixed, stable
+JSON keys defined by the IPMS database schema. There's no free-text
+label to fuzzy match against — "INS_HSE" is always spelled "INS_HSE".
+A direct dictionary lookup is the correct tool here, not a similarity
+engine.
 
-field_mapper.py's fuzzy engine is NOT deleted — it may still be
+field_mapper.py's fuzzy engine is not deleted — it may still be
 useful if IPMS's Field API is ever exposed as a separate, more
-dynamic endpoint later — but it is NOT what runs for this real
+dynamic endpoint later — but it is not what runs for this
 integration. This module is what runs instead.
 
 This module maps INS_* keys directly onto the same canonical concept
 names field_mapper.py used to produce, so requirement_inference.py
-needs ZERO changes — it already reads canonical names like
+needs no changes — it already reads canonical names like
 "job_risk_category", "hse_plan_available", "discipline", etc.
 """
 
@@ -37,8 +39,8 @@ from typing import Any, Optional
 
 
 # INS_* key -> canonical concept name (direct, exact mapping — no
-# fuzzy matching needed since these keys are fixed by Pranay's DB
-# schema, not free-text UI labels).
+# fuzzy matching needed since these keys are fixed by the IPMS
+# database schema, not free-text UI labels).
 INS_FIELD_MAP: dict[str, str] = {
     "INS_NO":                  "indent_no",
     "INS_FY_YR":                "indent_fy_yr",
@@ -133,14 +135,13 @@ DOCUMENT_GUID_FIELDS: list[tuple[str, str, str]] = [
 
 
 # Canonical fields treated as mandatory for the direct-gap check in
-# requirement_inference.py. Pranay's INS_* schema doesn't carry a
-# per-field "required" flag the way the old {question,answer,required}
-# shape did, so this list is a best-effort approximation based on
-# which fields showed a `*` in the IPMS UI screenshots reviewed
-# earlier (Package Description, Discipline, Estimated Cost, Technical
-# Spec, etc.). CONFIRM WITH PRANAY which INS_* columns are actually
-# NOT NULL / mandatory in the real DB schema — this list may need
-# correcting once he confirms.
+# requirement_inference.py. The IPMS INS_* schema does not carry a
+# per-field "required" flag the way the earlier {question, answer,
+# required} shape did, so this list is a best-effort approximation
+# based on which fields showed a `*` in the IPMS UI (Package
+# Description, Discipline, Estimated Cost, Technical Spec, etc.).
+# CONFIRM which INS_* columns are actually NOT NULL / mandatory in
+# the production database schema — this list may need correcting.
 REQUIRED_CANONICAL_FIELDS: set[str] = {
     "package_description",
     "discipline",
@@ -193,8 +194,8 @@ def map_ins_fields(raw: dict) -> MappingResult:
 
     Any key present in `raw` but NOT in INS_FIELD_MAP is preserved as
     "unmapped" rather than dropped, same principle as before: new or
-    renamed fields Pranay adds later shouldn't silently disappear,
-    they should surface so the map can be updated.
+    renamed fields added to the schema later shouldn't silently
+    disappear, they should surface so the map can be updated.
     """
     result = MappingResult()
 
