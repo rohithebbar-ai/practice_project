@@ -1,33 +1,45 @@
 """
 main.py
 ────────
-Minimal FastAPI entrypoint for the Indent Validation Service, wrapping
-your existing pipeline modules (document_analyzer, indent_comparator,
-field_mapper, requirement_inference) behind the API contract confirmed
-in the architecture doc:
+FastAPI entrypoint for the Indent Validation Service.
 
-    POST /check-adequacy { indent_id, domain }
-    -> { analysis_id, status: "processing" }   (returned immediately)
+Exposes a single endpoint, POST /check-adequacy, which IPMS calls
+synchronously when a user selects "Check Adequacy" on an indent. The
+request body contains the indent's field data and document references
+directly (see CheckAdequacyRequest below); the response contains the
+full adequacy analysis (see AnalysisResult below) — there is no
+separate acknowledgement step or callback.
 
-This is a STARTING skeleton, not a finished service — it shows the
-shape Cloud Run expects and where your existing modules plug in. You
-will need to fill in:
-  - _fetch_fields_from_ipms()      (real IPMS Field API client, once
-                                     Pranay exposes it — for now this
-                                     can call simulate_ipms_fields.py)
-  - _fetch_attachments()           (SharePoint OAuth client)
-  - the actual async job dispatch (Cloud Run request-response is
-    synchronous per request by default; for a real "processing" status
-    you'd typically push to Cloud Tasks/Pub-Sub and have a worker call
-    back into IPMS, or just make this endpoint block and return the
-    full result directly if response times stay under Cloud Run's
-    request timeout — simplest option for Iteration 1)
+Processing pipeline per request:
+  1. Map the indent's fields to canonical concept names
+     (ins_field_mapper.py)
+  2. Resolve and download referenced attachments by GUID
+     (_download_attachment_by_guid)
+  3. Parse and classify each attachment by content, not by filename
+     (document_analyzer.py)
+  4. Infer additional requirements implied by field values
+     (requirement_inference.py)
+  5. Run GENAI extraction across all documents for the indent
+     (document_analyzer.py)
+  6. Compare the extraction against the domain-matched standard and
+     produce a score (indent_comparator.py)
+
+The service is stateless aside from the standards held in memory
+(loaded once at startup from Cloud Storage); it does not write to any
+database — the caller is responsible for persisting the result.
+
+Known open items:
+  - Attachment download (_download_attachment_by_guid) still requires
+    real Document Store / SharePoint authentication details.
+  - Structured BOQ and vendor-panel data arriving in the request body
+    are not yet consumed by requirement_inference.py or the
+    comparator beyond what document-level extraction covers.
 
 Run locally:
     pip install fastapi uvicorn
     uvicorn main:app --reload --port 8080
 
-Cloud Run will set the PORT env var itself — see Dockerfile.
+Cloud Run sets the PORT env var itself — see Dockerfile.
 """
 
 from __future__ import annotations
@@ -35,15 +47,16 @@ from __future__ import annotations
 import os
 import json
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from ins_field_mapper import map_ins_fields, get_document_fetch_list
 from requirement_inference import infer_requirements
-# These now live under service/src/ — see folder-structure correction:
-# document_analyzer.py, document_parser.py, text_cleaner.py must move
-# from offline/src/ to service/src/, since they run on every live
-# "Check Adequacy" click (step 6 of the flow), not just during offline
+# document_analyzer.py, document_parser.py, and text_cleaner.py live
+# under service/src/ rather than the offline pipeline's src/ tree,
+# since they run on every live "Check Adequacy" request (document
+# classification and GENAI extraction), not just during offline
 # standard rebuilding.
 from src.document_analyzer import DocumentAnalyzer
 from src.document_parser import parse_file
@@ -53,30 +66,26 @@ from src.indent_comparator import compare_indent_to_standard
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("indent-validation-service")
 
-app = FastAPI(title="Indent Validation Service", version="1.0")
-
 # ── Standards are loaded into memory at startup, keyed by domain ───────────
-# Loaded from GCS (not bundled in the container image) — per Dhiraj:
-# "keep it modular, so we can change when we update without need to
-# update the cloud run." This means updating a standard is just
-# re-uploading a JSON to the bucket; no redeploy needed. The service
-# only re-reads the bucket at container startup, so a new Cloud Run
-# revision (or restart) is still needed to pick up a changed file —
-# but no rebuild/redeploy of the image itself.
+# Loaded from GCS rather than bundled into the container image, so
+# that publishing an updated standard is a matter of uploading a new
+# JSON file to the bucket rather than rebuilding and redeploying the
+# service. The bucket is re-read at container startup, so a new
+# revision or restart is needed to pick up a changed file, but not a
+# rebuild of the image itself.
 #
-# The bucket is created and access-granted by Dhiraj (project owner);
-# this service's own identity (its Cloud Run service account) needs
-# roles/storage.objectViewer on that bucket.
+# This service's own identity (its Cloud Run service account) needs
+# roles/storage.objectViewer on the standards bucket.
 #
 # GCS layout expected:
 #   gs://YOUR_BUCKET/standards/civil_standard.json
 #   gs://YOUR_BUCKET/standards/electromech_standard.json
 
 STANDARDS_BUCKET = os.environ.get("STANDARDS_BUCKET", "your-bucket-name")
-STANDARDS_PREFIX = os.environ.get("STANDARDS_PREFIX", "")  # files sit at
-                                                              # bucket root
-                                                              # per Dhiraj's
-                                                              # upload — no
+STANDARDS_PREFIX = os.environ.get("STANDARDS_PREFIX", "")  # files currently
+                                                              # sit at the
+                                                              # bucket root,
+                                                              # not under a
                                                               # "standards/"
                                                               # subfolder
 
@@ -99,13 +108,12 @@ def _load_standard_from_gcs(blob_name: str) -> dict:
     return json.loads(data)
 
 
-@app.on_event("startup")
-def load_standards():
+def _load_standards() -> None:
     """
-    Loads BOTH domain standards into memory once, at container startup.
-    Per Dhiraj's confirmed scope: only civil and electromech are opened
-    for "Check Adequacy" right now — other domains follow the same
-    route once IPMS sends them.
+    Loads all configured domain standards into memory once, at
+    container startup. Only civil and electromech are currently
+    active for "Check Adequacy" — additional domains follow the same
+    pattern once they're added to DOMAIN_TO_STANDARD_FILE.
     """
     for domain, filename in DOMAIN_TO_STANDARD_FILE.items():
         try:
@@ -123,10 +131,25 @@ def load_standards():
         )
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan handler (replaces the deprecated
+    @app.on_event("startup") pattern). Code before `yield` runs once
+    at container startup; code after `yield` would run at shutdown
+    (none needed here).
+    """
+    _load_standards()
+    yield
+
+
+app = FastAPI(title="Indent Validation Service", version="1.0", lifespan=lifespan)
+
+
 class CheckAdequacyRequest(BaseModel):
     """
-    Matches Pranay's CONFIRMED real payload shape (per his Excel
-    example): a NESTED object, not flat INS_* keys at the top level.
+    Matches the confirmed payload shape: a nested object, not flat
+    INS_* keys at the top level.
 
         {
           "Header": { "INS_NO": "12", "INS_FY_YR": "25-26", ... },
@@ -134,16 +157,14 @@ class CheckAdequacyRequest(BaseModel):
           "Vendors": [ {"INV_...": ...}, ... ]
         }
 
-    All the INS_* fields live under "Header", not at the top level —
-    this corrects an earlier version of this model that assumed a
-    flat structure. BOQ and Vendors are kept as separate top-level
-    objects (arrays of line-item / vendor-row dicts, matching the
-    "Indent BOQ Data" / "Indent Vendor Panel" tables from the PDF).
+    All INS_* fields live under "Header", not at the top level. BOQ
+    and Vendors are kept as separate top-level objects (arrays of
+    line-item / vendor-row dicts, matching the "Indent BOQ Data" /
+    "Indent Vendor Panel" tables in the architecture specification).
 
-    `extra = "allow"` inside Header-handling code (not here — Header
-    itself is just a dict) means any INS_* field not yet in
+    Any INS_* field under Header not yet present in
     ins_field_mapper.py's INS_FIELD_MAP is still preserved rather than
-    dropped, same principle as before.
+    dropped (see ins_field_mapper.py for details).
     """
     Header: dict
     BOQ: list[dict] = []
@@ -152,11 +173,10 @@ class CheckAdequacyRequest(BaseModel):
 
 class AnalysisResult(BaseModel):
     """
-    Matches section 2.2 of the architecture PDF — the full analysis
-    payload, returned directly and synchronously in the /check-adequacy
-    response body. Per Pranay's confirmation: no separate ack + later
-    callback — the response IS the result, same as the diagram Dhiraj
-    approved. This supersedes the earlier async assumption.
+    Matches section 2.2 of the architecture specification — the full
+    analysis payload, returned directly and synchronously in the
+    /check-adequacy response body. There is no separate acknowledgement
+    step or later callback; the response is the result.
     """
     analysis_id: str
     indent_id: str
@@ -237,11 +257,10 @@ def _run_analysis(
     analysis_id: str, indent_id: str, domain: str, raw_fields: dict
 ) -> AnalysisResult:
     """
-    The actual work: map fields, fetch+classify documents, infer
-    requirements, run GENAI extraction, compare & score. Called
-    directly (synchronously) from check_adequacy() — the caller gets
-    this function's return value back as the HTTP response body,
-    per Pranay's confirmation that the response IS the result.
+    The actual work: map fields, fetch and classify documents, infer
+    requirements, run GENAI extraction, compare and score. Called
+    directly (synchronously) from check_adequacy() — the caller
+    receives this function's return value as the HTTP response body.
     """
     try:
         standard = STANDARDS[domain]
@@ -351,7 +370,7 @@ def _download_attachment_by_guid(guid: str, path_hint: str | None) -> tuple[str,
     Downloads one attachment given its GUID (from the request body's
     INS_*_GUID fields). Returns (local_file_path, filename).
 
-    TODO once confirmed by Pranay/IT:
+    TODO once real credentials and endpoint details are available:
       - real SharePoint/Document Store download URL pattern for a GUID
       - real auth (Azure AD app registration, client-credentials flow
         — store client ID/secret in Secret Manager, not here)
