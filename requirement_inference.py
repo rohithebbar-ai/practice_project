@@ -275,24 +275,18 @@ def infer_requirements(
 
 
 if __name__ == "__main__":
-    from field_mapper import FieldMapper
+    from ins_field_mapper import map_ins_fields
 
-    sample_fields = [
-        {"question": "*Job Risk Category :", "answer": "High",
-         "required": True},
-        {"question": "*HSE plan document specific to this package for "
-                      "Service order available ?", "answer": "NA",
-         "required": True},
-        {"question": "*Is it a single party?", "answer": "No",
-         "required": True},
-        {"question": "*Discipline :", "answer": "Civil", "required": True},
-        {"question": "Technical Specification", "answer": "",
-         "required": True},
-        {"question": "*Class A Vendor?", "answer": "", "required": True},
-    ]
+    sample_header = {
+        "INS_RISK_CAT": "High",
+        "INS_HSE": "NA",
+        "INS_SINGLE_PARTY": "No",
+        "INS_DISCIPLINE": "Civil",
+        "INS_TS_PATH": "",
+        "INS_IS_CLASSC_VENDOR": "",
+    }
 
-    mapper = FieldMapper()
-    mapping = mapper.map_fields(sample_fields)
+    mapping = map_ins_fields(sample_header)
 
     print("=== domain=civil ===")
     inference = infer_requirements(mapping, domain="civil")
