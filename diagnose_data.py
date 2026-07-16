@@ -1,5 +1,11 @@
 cd ~/ipms-indent-validation
 
+
+gcloud auth print-identity-token \
+  --impersonate-service-account=svc-ipms-indent-validation@tsl-generative-ai.iam.gserviceaccount.com \
+  --audiences=https://genai-api-development-one-it-423929642383.asia-south1.run.app
+
+
 gcloud secrets create genai-key \
   --project=tsl-generative-ai \
   --replication-policy="automatic" \
