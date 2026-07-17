@@ -88,6 +88,15 @@ gcloud run jobs create test-genai-auth \
   --service-account=svc-ipms-indent-validation@tsl-generative-ai.iam.gserviceaccount.com \
   --set-env-vars="GENAI_AUTH_URL=<gateway_url>,GENAI_API_URL=<api_url>,GENAI_API_KEY=<key>,GENAI_ADID=<adid>"
 
+gcloud run deploy test-genai-auth \
+  --project=tsl-generative-ai \
+  --region=asia-south1 \
+  --source=. \
+  --service-account=svc-ipms-indent-validation@tsl-generative-ai.iam.gserviceaccount.com \
+  --set-env-vars="GENAI_AUTH_URL=https://genai-api-development-one-it-423929642383.asia-south1.run.app,GENAI_API_URL=https://tslgenaiapidev.corp.tatasteel.com/genai,GENAI_API_KEY=SGB7QI6ZVDLCL6W1,GENAI_ADID=ayfph2508h,GENAI_MODEL=gpt-4o-mini" \
+  --allow-unauthenticated
+
+
 
 gcloud run jobs executions list --job=test-genai-auth --project=tsl-generative-ai --region=asia-south1
 
