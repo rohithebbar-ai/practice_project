@@ -37,3 +37,28 @@ def test_genai_access():
 
 if __name__ == "__main__":
     test_genai_access()
+
+
+
+FROM python:3.12-slim
+WORKDIR /app
+RUN pip install --no-cache-dir google-auth requests
+COPY test_auth.py .
+CMD ["python", "test_auth.py"]
+
+gcloud run jobs create test-genai-auth \
+  --project=tsl-generative-ai \
+  --region=asia-south1 \
+  --source=. \
+  --service-account=svc-ipms-indent-validation@tsl-generative-ai.iam.gserviceaccount.com \
+  --set-env-vars="GENAI_AUTH_URL=<gateway_url>,GENAI_API_URL=<api_url>,GENAI_API_KEY=<key>,GENAI_ADID=<adid>"
+
+
+gcloud run jobs executions list --job=test-genai-auth --project=tsl-generative-ai --region=asia-south1
+
+
+
+gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=test-genai-auth" --project=tsl-generative-ai --limit=50
+
+    
+
