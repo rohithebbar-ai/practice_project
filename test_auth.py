@@ -112,4 +112,18 @@ gcloud run jobs executions list --job=test-genai-auth --project=tsl-generative-a
 gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=test-genai-auth" --project=tsl-generative-ai --limit=50
 
     
+gcloud auth print-identity-token \
+  --audiences=https://genai-api-development-one-it-423929642383.asia-south1.run.app
+
+
+TOKEN=$(gcloud auth print-identity-token --audiences=https://genai-api-development-one-it-423929642383.asia-south1.run.app)
+
+curl -X POST "https://tslgenaiapidev.corp.tatasteel.com/genai" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "deployment_name=gpt-4o-mini" \
+  -d "temperature=0.1" \
+  -d "adid=ayfph2508h" \
+  -d "apikey=SGB7QI6ZVDLCL6W1" \
+  -d 'messages=[{"role":"user","content":"Say hello in one word."}]' \
+  -d "max_tokens=20"
 
