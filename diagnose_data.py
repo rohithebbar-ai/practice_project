@@ -1,5 +1,7 @@
 cd ~/ipms-indent-validation
 
+pip freeze | grep -iE "pandas|openpyxl|python-docx|pymupdf|pytesseract|pillow|tiktoken|streamlit|xlrd|pydantic|fastapi|uvicorn"
+
 
 gcloud auth print-identity-token \
   --impersonate-service-account=svc-ipms-indent-validation@tsl-generative-ai.iam.gserviceaccount.com \
